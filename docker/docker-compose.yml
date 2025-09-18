@@ -33,13 +33,7 @@ services:
     command: >
       bash -c "
         airflow db init &&
-        airflow users create \
-          --username admin \
-          --firstname Admin \
-          --lastname User \
-          --role Admin \
-          --email admin@stockelper.com \
-          --password admin &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@stockelper.com --password admin &&
         airflow scheduler &
         airflow webserver
       "
