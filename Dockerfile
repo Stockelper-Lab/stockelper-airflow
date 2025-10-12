@@ -19,14 +19,15 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver - using fixed stable version for faster builds
-# Update this version when Chrome updates (check compatibility at https://googlechromelabs.github.io/chrome-for-testing/)
-RUN CHROME_DRIVER_VERSION="131.0.6778.204" \
+# Install ChromeDriver - automatically match Chrome version
+RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d '.' -f 1) \
+    && CHROME_DRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_VERSION}") \
     && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip \
     && unzip /tmp/chromedriver.zip -d /tmp/ \
     && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
+    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 \
+    && echo "Installed ChromeDriver version: ${CHROME_DRIVER_VERSION}"
 
 # Switch back to airflow user
 USER airflow
@@ -38,7 +39,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy DAGs and modules
 COPY dags/ /opt/airflow/dags/
-COPY modules/ /opt/airflow/dags/modules/
+COPY modules/ /opt/airflow/modules/
 COPY config/airflow.cfg /opt/airflow/airflow.cfg
 
 # Set environment variables

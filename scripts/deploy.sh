@@ -55,8 +55,8 @@ if [ ! -f ".env" ]; then
 fi
 
 # Check if required files exist
-if [ ! -f "docker/Dockerfile" ]; then
-    echo -e "${RED}❌ Dockerfile not found in docker/ directory${NC}"
+if [ ! -f "Dockerfile" ]; then
+    echo -e "${RED}❌ Dockerfile not found in project root${NC}"
     exit 1
 fi
 

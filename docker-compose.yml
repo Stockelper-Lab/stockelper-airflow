@@ -11,10 +11,10 @@ services:
       - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__CORE__DEFAULT_TIMEZONE=UTC
-      - AIRFLOW__WEBSERVER__WEB_SERVER_PORT=21003
+      - AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8080
       - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:21003
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/data/airflow.db
       - AIRFLOW_ADMIN_USERNAME=${AIRFLOW_ADMIN_USERNAME:-admin}
       - AIRFLOW_ADMIN_PASSWORD=${AIRFLOW_ADMIN_PASSWORD:-admin}
       - AIRFLOW_ADMIN_EMAIL=${AIRFLOW_ADMIN_EMAIL:-admin@stockelper.com}
@@ -25,7 +25,7 @@ services:
       - "21003:8080"   # Webserver
     volumes:
       - airflow_logs:/opt/airflow/logs
-      - airflow_db:/opt/airflow
+      - ./data:/opt/airflow/data
     networks:
       - stockelper
     command: >
@@ -37,14 +37,13 @@ services:
       "
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:21003/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
 volumes:
   airflow_logs:
-  airflow_db:
 
 networks:
   stockelper:
