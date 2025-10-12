@@ -8,6 +8,9 @@ from airflow.operators.bash import BashOperator
 
 # env info from .env file
 MONGODB_URI = os.getenv("MONGODB_URI")
+MONGO_DATABASE = os.getenv("MONGO_DATABASE")
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI environment variable is required")
 
 with DAG(
     dag_id="competitor_crawler",

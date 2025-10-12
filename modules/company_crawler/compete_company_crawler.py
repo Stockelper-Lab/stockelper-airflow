@@ -9,6 +9,7 @@ License: MIT
 """
 
 import os
+import sys
 import requests
 import pymongo
 import FinanceDataReader as fdr
@@ -16,12 +17,16 @@ from bs4 import BeautifulSoup
 from time import sleep
 from datetime import datetime
 import json
-import logging
 from tqdm import tqdm
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Add module path for imports
+sys.path.insert(0, '/opt/airflow')
+
+# Import common logging configuration
+from modules.common.logging_config import setup_logger
+
+# Setup logger
+logger = setup_logger(__name__)
 
 # Environment variables and constants
 MONGODB_URI = os.environ.get("MONGODB_URI")

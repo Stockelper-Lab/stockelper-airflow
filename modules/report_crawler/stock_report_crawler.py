@@ -10,7 +10,6 @@ License: MIT
 
 import os
 import sys
-import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from selenium import webdriver
@@ -22,9 +21,16 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from pymongo import MongoClient
 import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Add module path for imports
+sys.path.insert(0, '/opt/airflow')
+
+# Import common logging configuration
+from modules.common.logging_config import setup_logger
+
+# Setup logger
+logger = setup_logger(__name__)
+
+MONGODB_URI = os.environ.get("MONGODB_URI")
 
 class StockReportCrawler:
     """
@@ -39,7 +45,7 @@ class StockReportCrawler:
             mongodb_uri (str): MongoDB connection URI
             headless (bool): Whether to run Chrome in headless mode
         """
-        self.mongodb_uri = mongodb_uri or os.environ.get("MONGODB_URI", "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/")
+        self.mongodb_uri = MONGODB_URI
         self.headless = headless
         self.driver = None
         self.collection = None
