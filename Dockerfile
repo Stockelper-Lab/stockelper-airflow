@@ -1,5 +1,5 @@
 # Use official Airflow image as base
-FROM --platform=linux/amd64 apache/airflow:2.7.1-python3.11
+FROM --platform=linux/amd64 apache/airflow:2.10.4-python3.12
 
 # Switch to root user to install system dependencies
 USER root
@@ -19,12 +19,14 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver - using fixed version for compatibility
-RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
-    && wget -q "https://chromedriver.storage.googleapis.com/${CHROME_DRIVER_VERSION}/chromedriver_linux64.zip" \
-    && unzip chromedriver_linux64.zip -d /usr/local/bin/ \
-    && rm chromedriver_linux64.zip \
-    && chmod +x /usr/local/bin/chromedriver
+# Install ChromeDriver - using fixed stable version for faster builds
+# Update this version when Chrome updates (check compatibility at https://googlechromelabs.github.io/chrome-for-testing/)
+RUN CHROME_DRIVER_VERSION="131.0.6778.204" \
+    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip \
+    && unzip /tmp/chromedriver.zip -d /tmp/ \
+    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
 
 # Switch back to airflow user
 USER airflow
