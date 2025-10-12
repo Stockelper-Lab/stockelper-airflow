@@ -44,7 +44,7 @@ from config.mongo_config import MONGO_HOST, MONGO_PORT, MONGO_DATABASE
 from modules.report_crawler.crawler import StockReportCrawler
 
 # MongoDB connection information
-MONGODB_URI = f"mongodb://{MONGO_HOST}:{MONGO_PORT}/"
+MONGODB_URI = os.getenv("MONGODB_URI")
 
 # Default arguments
 default_args = {

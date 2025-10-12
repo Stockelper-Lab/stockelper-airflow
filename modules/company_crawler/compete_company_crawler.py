@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Environment variables and constants
-MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/")
+MONGODB_URI = os.environ.get("MONGODB_URI")
 DB_NAME = "stockelper"
 COLLECTION_NAME = "competitors"
 
@@ -35,10 +35,9 @@ def get_mongo_collection():
     Returns:
         pymongo.Collection: MongoDB collection object or None if connection fails
     """
-    mongo_uri = os.environ.get("MONGODB_URI", "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/")
     try:
         # Set connection timeout to 5 seconds
-        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        client = pymongo.MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
         client.server_info()  # Test connection
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
@@ -48,7 +47,7 @@ def get_mongo_collection():
         logger.error(f"Failed to connect to MongoDB: {e}")
         logger.error("Please check:")
         logger.error("- MongoDB server is running")
-        logger.error(f"- MONGODB_URI environment variable is set correctly (current: {mongo_uri})")
+        logger.error(f"- MONGODB_URI environment variable is set correctly (current: {MONGODB_URI})")
         return None
 
 def get_all_stock_codes():
