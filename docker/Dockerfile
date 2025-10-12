@@ -1,5 +1,5 @@
 # Use official Airflow image as base
-FROM apache/airflow:2.7.1-python3.11
+FROM --platform=linux/amd64 apache/airflow:2.7.1-python3.11
 
 # Switch to root user to install system dependencies
 USER root
@@ -31,6 +31,7 @@ USER airflow
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /tmp/requirements.txt
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy DAGs and modules
