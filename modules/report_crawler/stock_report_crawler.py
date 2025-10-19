@@ -19,62 +19,46 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from pymongo import MongoClient
 import time
 
 # Add module path for imports
 sys.path.insert(0, '/opt/airflow')
 
-# Import common logging configuration
+# Import common logging and database connection
 from modules.common.logging_config import setup_logger
+from modules.common.db_connections import get_db_connection
 
 # Setup logger
 logger = setup_logger(__name__)
-
-MONGODB_URI = os.environ.get("MONGODB_URI")
 
 class StockReportCrawler:
     """
     Stock Report Crawler class for scraping financial research reports.
     """
     
-    def __init__(self, mongodb_uri=None, mongo_database=None, headless=True):
+    def __init__(self, headless=True):
         """
         Initialize the Stock Report Crawler.
         
         Args:
-            mongodb_uri (str): MongoDB connection URI
-            mongo_database (str): MongoDB database name
             headless (bool): Whether to run Chrome in headless mode
         """
-        self.mongodb_uri = mongodb_uri or MONGODB_URI
-        self.mongo_database = mongo_database or os.environ.get("MONGO_DATABASE", "stockelper")
         self.headless = headless
         self.driver = None
+        self.db = None
         self.collection = None
         
-        # Initialize MongoDB connection
-        self._init_mongodb()
-        
-    def _init_mongodb(self):
-        """Initialize MongoDB connection and collection."""
         try:
-            client = MongoClient(self.mongodb_uri, serverSelectionTimeoutMS=5000)
-            client.server_info()  # Test connection
-            self.db = client[self.mongo_database]
+            self.db = get_db_connection()
             self.collection = self.db["report"]
-            
-            # Create indexes for duplicate prevention
             self.collection.create_index([
                 ('date', 1), 
                 ('company', 1), 
                 ('code', 1)
             ], unique=True)
-            
             logger.info("Successfully connected to MongoDB and created indexes.")
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
-            self.collection = None
     
     def setup_driver(self):
         """Setup Chrome WebDriver with appropriate options."""
@@ -313,17 +297,4 @@ class StockReportCrawler:
             logger.error(f"Failed to get statistics: {e}")
             return {"error": str(e)}
 
-def main():
-    """Main function for testing the crawler."""
-    crawler = StockReportCrawler()
-    
-    # Test crawling
-    result = crawler.crawl_daily_report(daily=True)
-    print(f"Crawling result: {result}")
-    
-    # Get statistics
-    stats = crawler.get_crawl_statistics()
-    print(f"Statistics: {stats}")
 
-if __name__ == "__main__":
-    main()
