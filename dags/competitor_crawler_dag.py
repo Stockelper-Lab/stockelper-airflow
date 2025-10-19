@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
 import pendulum
 
 from airflow.models.dag import DAG
 from airflow.operators.bash import BashOperator
+
+# env info from .env file
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGO_DATABASE = os.getenv("MONGO_DATABASE")
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI environment variable is required")
 
 with DAG(
     dag_id="competitor_crawler",
@@ -22,7 +29,7 @@ with DAG(
         task_id="crawl_competitor_companies",
         bash_command="python /opt/airflow/modules/company_crawler/compete_company_crawler.py",
         env={
-            "MONGODB_URI": "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/",
+            "MONGODB_URI": MONGODB_URI,
             "PYTHONPATH": "/opt/airflow"
         },
     )

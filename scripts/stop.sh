@@ -1,19 +1,31 @@
 #!/bin/bash
 
+##############################################################################
 # Stockelper Airflow Stop Script
+#
 # This script stops the Airflow environment
+#
+# Author: Stockelper Team
+# License: MIT
+##############################################################################
 
 set -e
 
-echo "🛑 Stopping Stockelper Airflow..."
+# Color codes
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Navigate to the docker directory
+echo -e "${BLUE}🛑 Stopping Stockelper Airflow...${NC}"
+
+# Navigate to the project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-cd "$PROJECT_ROOT/docker"
+cd "$PROJECT_ROOT"
 
 # Stop and remove containers
-docker-compose down --remove-orphans
+docker compose down --remove-orphans
 
-echo "✅ Airflow services stopped successfully!"
-echo "💡 To start again, run: ./scripts/deploy.sh"
+echo -e "${GREEN}✅ Airflow services stopped successfully!${NC}"
+echo -e "${YELLOW}💡 To start again, run:${NC} ./scripts/deploy.sh"
