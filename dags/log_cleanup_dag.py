@@ -8,19 +8,15 @@ Author: Stockelper Team
 License: MIT
 """
 
-from datetime import datetime, timedelta
 import os
-import sys
 import shutil
 from pathlib import Path
+from datetime import datetime, timedelta
 
-from airflow import DAG
+import pendulum
+from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
-# Add module path for imports
-sys.path.insert(0, '/opt/airflow')
-
-# Import common logging configuration
 from modules.common.logging_config import setup_logger
 
 # Setup logger
@@ -30,6 +26,15 @@ logger = setup_logger(__name__)
 LOG_BASE_FOLDER = "/opt/airflow/logs"
 LOG_RETENTION_DAYS = 7  # Keep logs for 7 days
 DRY_RUN = False  # Set to True to see what would be deleted without actually deleting
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': pendulum.duration(minutes=5),
+}
 
 def cleanup_old_logs(**context):
     """
@@ -156,24 +161,19 @@ def get_log_statistics(**context):
         logger.error(f"Error getting log statistics: {e}")
         raise
 
-# Default arguments
-default_args = {
-    'owner': 'stockelper',
-    'depends_on_past': False,
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
-}
-
-# Create DAG
 with DAG(
     dag_id='log_cleanup',
     default_args=default_args,
     description='Clean up old Airflow logs to manage disk space',
     schedule='0 2 * * *',  # Run daily at 2 AM UTC
-    start_date=datetime(2025, 1, 1),
+    start_date=pendulum.datetime(2023, 1, 1, tz="UTC"),
     catchup=False,
+    doc_md="""
+    ### Log Cleanup DAG
+
+    This DAG automatically cleans up old Airflow logs to prevent disk space issues.
+    It runs daily and removes logs older than the specified retention period.
+    """,
     tags=['maintenance', 'logs'],
 ) as dag:
     
@@ -181,21 +181,18 @@ with DAG(
     get_stats_task = PythonOperator(
         task_id='get_log_statistics',
         python_callable=get_log_statistics,
-        provide_context=True,
     )
     
     # Task 2: Clean up old logs
     cleanup_task = PythonOperator(
         task_id='cleanup_old_logs',
         python_callable=cleanup_old_logs,
-        provide_context=True,
     )
     
     # Task 3: Get statistics after cleanup
     get_stats_after_task = PythonOperator(
         task_id='get_log_statistics_after_cleanup',
         python_callable=get_log_statistics,
-        provide_context=True,
     )
     
     # Define task dependencies

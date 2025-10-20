@@ -13,7 +13,7 @@ services:
       - AIRFLOW__CORE__DEFAULT_TIMEZONE=UTC
       - AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8080
       - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:21003
-      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY}
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY:-test}
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/data/airflow.db
       - AIRFLOW_ADMIN_USERNAME=${AIRFLOW_ADMIN_USERNAME:-admin}
       - AIRFLOW_ADMIN_PASSWORD=${AIRFLOW_ADMIN_PASSWORD:-admin}
@@ -26,6 +26,10 @@ services:
     volumes:
       - airflow_logs:/opt/airflow/logs
       - ./data:/opt/airflow/data
+      #- ./config/airflow.cfg:/opt/airflow/config/airflow.cfg
+      #- ./config:/opt/airflow/config
+      #- ./dags:/opt/airflow/dags
+      #- ./modules:/opt/airflow/modules
     networks:
       - stockelper
     command: >
@@ -42,8 +46,25 @@ services:
       timeout: 10s
       retries: 3
 
+  #it is for local mongo db
+  #mongodb:
+  #  image: mongo:7.0
+  #  container_name: stockelper-mongodb
+  #  restart: always
+  #  ports:
+  #    - "27017:27017"
+  #  environment:
+  #    MONGO_INITDB_DATABASE: stockelper
+  #  volumes:
+  #    - mongodb_data:/data/db
+  #    - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+  #  networks:
+  #    - stockelper
+
 volumes:
   airflow_logs:
+  #it is for local mongo db
+  #mongodb_data:
 
 networks:
   stockelper:
