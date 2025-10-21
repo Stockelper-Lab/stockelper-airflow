@@ -26,10 +26,10 @@ services:
     volumes:
       - airflow_logs:/opt/airflow/logs
       - ./data:/opt/airflow/data
-      #- ./config/airflow.cfg:/opt/airflow/config/airflow.cfg
-      #- ./config:/opt/airflow/config
-      #- ./dags:/opt/airflow/dags
-      #- ./modules:/opt/airflow/modules
+      - ./config/airflow.cfg:/opt/airflow/config/airflow.cfg
+      - ./config:/opt/airflow/config
+      - ./dags:/opt/airflow/dags
+      - ./modules:/opt/airflow/modules
     networks:
       - stockelper
     command: >
