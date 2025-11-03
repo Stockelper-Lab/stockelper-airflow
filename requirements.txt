@@ -25,3 +25,7 @@ tqdm>=4.64.0
 # Development and testing
 pytest>=8.0.0
 pytest-cov>=6.0.0
+
+pandas>=2.3.3
+neo4j>=6.0.2
+apache-airflow-providers-neo4j>=3.10.2
