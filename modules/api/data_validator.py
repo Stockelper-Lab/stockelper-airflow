@@ -22,7 +22,8 @@ except ImportError:
 
 # 라이브러리 로드 예외 처리
 try:
-    from modules.OpenDartReader.dart import OpenDartReader
+    # from modules.OpenDartReader.dart import OpenDartReader
+    import OpenDartReader
 except ImportError:
     print("OpenDartReader가 설치되지 않았습니다. pip install OpenDartReader")
     OpenDartReader = None
