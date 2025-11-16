@@ -11,6 +11,7 @@ from airflow.operators.python import PythonOperator
 
 # Assuming the `dags` directory is in PYTHONPATH, we can import from operators
 from modules.neo4j.neo4j_operators import *
+from modules.api.data_validator import run_validate
 
 # --- Constants --- #
 # The connection ID for the Neo4j connection configured in the Airflow UI.
@@ -45,14 +46,27 @@ with DAG(
     )
 
     # Task 2: Extract data from a source (currently a local file)
+    #extract_daily_data_task = PythonOperator(
+    #    task_id="extract_daily_data",
+    #    python_callable=extract_data_from_request,
+    #    op_kwargs={
+    #        "url": "https://raw.githubusercontent.com/ssilb4/test-file-storage/refs/heads/main/input.json",
+    #    },
+    #    trigger_rule="all_done",
+    #)
+
+
+    # Task 2: Extract data from a source (currently a local file)
     extract_daily_data_task = PythonOperator(
         task_id="extract_daily_data",
-        python_callable=extract_data_from_request,
+        python_callable=run_validate,
         op_kwargs={
-            "url": "https://raw.githubusercontent.com/ssilb4/test-file-storage/refs/heads/main/input.json",
+            "test_company": "삼성전자", 
+            "test_stock_code": "005930"
         },
         trigger_rule="all_done",
     )
+
     # Task 3: Load the extracted data into Neo4j
     load_daily_data_task = PythonOperator(
         task_id="load_daily_data",
