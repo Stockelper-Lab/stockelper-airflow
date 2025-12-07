@@ -21,10 +21,15 @@ finance-datareader>=0.9.0
 # Utilities
 python-dateutil>=2.8.0
 tqdm>=4.64.0
+python-dotenv>=1.0.0
 
 # Development and testing
 pytest>=8.0.0
 pytest-cov>=6.0.0
 
+# Neo4j
 neo4j>=6.0.2
 apache-airflow-providers-neo4j>=3.10.2
+
+# DART API
+OpenDartReader>=0.2.0
