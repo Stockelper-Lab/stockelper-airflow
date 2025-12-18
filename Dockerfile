@@ -17,6 +17,9 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable \
+    && apt-get install -y build-essential \
+    && apt-get install -y gcc \
+    && apt-get install -y python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ChromeDriver - automatically match Chrome version
@@ -35,7 +38,7 @@ USER airflow
 # Copy requirements and install Python dependencies
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 
 # Copy DAGs and modules
 COPY dags/ /opt/airflow/dags/
