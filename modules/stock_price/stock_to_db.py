@@ -129,9 +129,12 @@ def load_data_to_postgres(**kwargs):
     XCom에서 DataFrame 리스트를 받아 하나로 합쳐 DB에 적재합니다.
     """
     ti = kwargs["ti"]
-    processed_data = ti.xcom_pull(task_ids="fetch_and_process_stock_data")
 
-    valid_dfs = [df for df in processed_data if df is not None and not df.empty]
+    processed_data = ti.xcom_pull(task_ids="fetch_and_process_stock_data")
+    if processed_data is not None:
+        valid_dfs = [df for df in processed_data if df is not None and not df.empty]
+    else:
+        valid_dfs = []
 
     if not valid_dfs:
         log.info("No dataframes to load.")
