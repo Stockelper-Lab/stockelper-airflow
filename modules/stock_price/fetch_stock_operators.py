@@ -67,12 +67,12 @@ class FetchStockDataOperator(BaseOperator):
                     log.error(
                         f"Failed to fetch even KRX data for {self.symbol}: {krx_e}"
                     )
-                    return df
+                    return df if df else None
             else:
                 log.error(
                     f"An unexpected error occurred while fetching data for {self.symbol}: {e}"
                 )
-                return df
+                return df if df else None
 
         if df.empty:
             log.warning(f"No data found for symbol {self.symbol} after processing.")
