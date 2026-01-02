@@ -9,21 +9,12 @@ Author: Stockelper Team
 License: MIT
 """
 
-import os
 import pymongo
 from .logging_config import setup_logger
+from .airflow_settings import get_required_setting
 
 # Setup logger
 logger = setup_logger(__name__)
-
-# Environment variables
-MONGODB_URI = os.getenv("MONGODB_URI")
-MONGO_DATABASE = os.getenv("MONGO_DATABASE")
-
-if not MONGODB_URI:
-    raise ValueError("MONGODB_URI environment variable is required")
-if not MONGO_DATABASE:
-    raise ValueError("MONGO_DATABASE environment variable is required")
 
 def get_db_connection():
     """
@@ -37,10 +28,13 @@ def get_db_connection():
     """
 
     try:
-        client = pymongo.MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        mongodb_uri = get_required_setting("MONGODB_URI")
+        mongo_database = get_required_setting("MONGO_DATABASE")
+
+        client = pymongo.MongoClient(mongodb_uri, serverSelectionTimeoutMS=5000)
         client.server_info()  # Test connection
-        db = client[MONGO_DATABASE]
-        logger.info(f"Successfully connected to MongoDB database: {MONGO_DATABASE}")
+        db = client[mongo_database]
+        logger.info("Successfully connected to MongoDB database: %s", mongo_database)
         return db
     except pymongo.errors.ConnectionFailure as e:
         logger.error(f"Failed to connect to MongoDB: {e}")

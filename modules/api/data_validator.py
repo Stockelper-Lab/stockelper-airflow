@@ -13,12 +13,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-# Airflow 환경이 아닐 경우를 대비한 예외 처리
-try:
-    from airflow.models import Variable
-except ImportError:
-    print("Airflow가 설치되지 않았습니다. .env 파일에서 설정을 로드합니다.")
-    Variable = None
+from modules.common.airflow_settings import get_setting
 
 # 라이브러리 로드 예외 처리
 try:
@@ -41,10 +36,8 @@ load_dotenv()
 
 
 def _get_variable(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Airflow Variable 또는 환경 변수에서 값을 가져옵니다."""
-    if Variable:
-        return Variable.get(key, default_var=default)
-    return os.getenv(key, default)
+    """Airflow Variable → 환경 변수 순으로 값을 가져옵니다."""
+    return get_setting(key, default)
 
 
 # KIS API 액세스 토큰을 저장하기 위한 전역 변수
