@@ -1,5 +1,5 @@
 # Use official Airflow image as base
-FROM --platform=linux/amd64 apache/airflow:2.7.1-python3.11
+FROM --platform=linux/amd64 apache/airflow:2.10.4-python3.12
 
 # Switch to root user to install system dependencies
 USER root
@@ -17,14 +17,20 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable \
+    && apt-get install -y build-essential \
+    && apt-get install -y gcc \
+    && apt-get install -y python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver - using fixed version for compatibility
-RUN CHROME_DRIVER_VERSION="114.0.5735.90" \
-    && wget -q "https://chromedriver.storage.googleapis.com/${CHROME_DRIVER_VERSION}/chromedriver_linux64.zip" \
-    && unzip chromedriver_linux64.zip -d /usr/local/bin/ \
-    && rm chromedriver_linux64.zip \
-    && chmod +x /usr/local/bin/chromedriver
+# Install ChromeDriver - automatically match Chrome version
+RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d '.' -f 1) \
+    && CHROME_DRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_VERSION}") \
+    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip \
+    && unzip /tmp/chromedriver.zip -d /tmp/ \
+    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 \
+    && echo "Installed ChromeDriver version: ${CHROME_DRIVER_VERSION}"
 
 # Switch back to airflow user
 USER airflow
@@ -32,11 +38,11 @@ USER airflow
 # Copy requirements and install Python dependencies
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 
 # Copy DAGs and modules
 COPY dags/ /opt/airflow/dags/
-COPY modules/ /opt/airflow/dags/modules/
+COPY modules/ /opt/airflow/modules/
 COPY config/airflow.cfg /opt/airflow/airflow.cfg
 
 # Set environment variables

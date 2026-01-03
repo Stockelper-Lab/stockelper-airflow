@@ -1,0 +1,79 @@
+services:
+  airflow:
+    build:
+      dockerfile: Dockerfile
+    container_name: stockelper-airflow
+    user: "50000:0"
+    environment:
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__PLUGINS_FOLDER=/opt/airflow/plugins
+      - AIRFLOW__CORE__BASE_LOG_FOLDER=/opt/airflow/logs
+      - AIRFLOW__CORE__LOGGING_LEVEL=INFO
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=UTC
+      - AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8080
+      - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:21003
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY:-test}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/data/airflow.db
+      - AIRFLOW_ADMIN_USERNAME=${AIRFLOW_ADMIN_USERNAME:-admin}
+      - AIRFLOW_ADMIN_PASSWORD=${AIRFLOW_ADMIN_PASSWORD:-admin}
+      - AIRFLOW_ADMIN_EMAIL=${AIRFLOW_ADMIN_EMAIL:-admin@stockelper.com}
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGO_DATABASE=${MONGO_DATABASE:-stockelper}
+      - NEO4J_URI=${NEO4J_URI:-bolt://stockelper-neo4j:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      # Allow importing sibling repo `stockelper-kg` (mounted below) from Airflow DAGs
+      - PYTHONPATH=/opt/airflow:/opt/airflow/stockelper-kg/src
+    ports:
+      - "21003:8080"   # Webserver
+    volumes:
+      - airflow_logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ./config/airflow.cfg:/opt/airflow/config/airflow.cfg
+      - ./config:/opt/airflow/config
+      - ./dags:/opt/airflow/dags
+      - ./modules:/opt/airflow/modules
+      - ../stockelper-kg:/opt/airflow/stockelper-kg:ro
+    networks:
+      - stockelper
+    command: >
+      bash -c "
+        airflow db init &&
+        airflow users create --username $${AIRFLOW_ADMIN_USERNAME} --firstname Admin --lastname User --role Admin --email $${AIRFLOW_ADMIN_EMAIL} --password $${AIRFLOW_ADMIN_PASSWORD} || true &&
+        airflow scheduler &
+        airflow webserver
+      "
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  #it is for local mongo db
+  #mongodb:
+  #  image: mongo:7.0
+  #  container_name: stockelper-mongodb
+  #  restart: always
+  #  ports:
+  #    - "27017:27017"
+  #  environment:
+  #    MONGO_INITDB_DATABASE: stockelper
+  #  volumes:
+  #    - mongodb_data:/data/db
+  #    - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+  #  networks:
+  #    - stockelper
+
+volumes:
+  airflow_logs:
+  #it is for local mongo db
+  #mongodb_data:
+
+networks:
+  stockelper:
+    driver: bridge
+    name: stockelper
+    external: true

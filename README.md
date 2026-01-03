@@ -8,18 +8,21 @@
 
 ```
 stockelper-airflow/
-├── dags/                    # Airflow DAG 정의 파일
+├── dags/                           # Airflow DAG 정의 파일
 │   ├── stock_report_crawler_dag.py
-│   └── competitor_crawler_dag.py
-├── modules/                 # 재사용 가능한 Python 모듈
+│   ├── competitor_crawler_dag.py
+│   └── log_cleanup_dag.py
+├── modules/                        # 재사용 가능한 Python 모듈
+│   ├── common/                     # 공통 유틸리티
+│   │   └── logging_config.py
 │   ├── report_crawler/
-│   │   └── crawler.py
+│   │   └── stock_report_crawler.py
 │   └── company_crawler/
 │       └── compete_company_crawler.py
-├── config/                  # 설정 파일
-├── docker/                  # Docker 설정 파일
-├── scripts/                 # 유틸리티 스크립트
-└── README.md               # 이 파일
+├── config/                         # 설정 파일
+├── scripts/                        # 유틸리티 스크립트
+├── docs/                           # 문서
+└── README.md                       # 이 파일
 ```
 
 ## 📊 사용 가능한 DAG
@@ -39,7 +42,7 @@ stockelper-airflow/
 
 ### 2. 경쟁사 크롤러 (`competitor_crawler_dag.py`)
 
-**스케줄**: 매일 자정 UTC  
+**스케줄**: 매일 00:00 UTC  
 **목적**: Wisereport에서 모든 상장 기업의 경쟁사 정보 크롤링
 
 **태스크**:
@@ -48,15 +51,41 @@ stockelper-airflow/
 **데이터 소스**: Wisereport 경쟁사 분석 API  
 **출력**: 기업 경쟁사 관계가 포함된 MongoDB 컬렉션
 
+### 3. 로그 정리 (`log_cleanup_dag.py`)
+
+**스케줄**: 매일 02:00 UTC  
+**목적**: 오래된 Airflow 로그 파일 자동 정리
+
+**태스크**:
+- `get_log_statistics`: 현재 로그 상태 확인
+- `cleanup_old_logs`: 7일 이상 된 로그 삭제
+- `get_log_statistics_after_cleanup`: 정리 후 상태 확인
+
+**보관 기간**: 7일  
+**효과**: 디스크 공간 관리 및 성능 최적화
+
 ## 🔧 모듈
+
+### 공통 모듈
+
+**위치**: `modules/common/logging_config.py`
+
+**주요 기능**:
+- 통합 로깅 설정
+- 일관된 로그 포맷
+- Airflow 환경 최적화
+- 중복 핸들러 방지
+
+**주요 함수**:
+- `setup_logger()`: 로거 인스턴스 생성 및 설정
+- `get_logger()`: 기본 설정으로 로거 가져오기
 
 ### 리포트 크롤러 모듈
 
-**위치**: `modules/report_crawler/crawler.py`
+**위치**: `modules/report_crawler/stock_report_crawler.py`
 
 **주요 기능**:
 - Selenium 기반 웹 스크래핑
-- Pandas 데이터 처리
 - 중복 방지 기능이 포함된 MongoDB 통합
 - 설정 가능한 날짜 범위 크롤링
 - 포괄적인 로깅 및 오류 처리
@@ -64,7 +93,7 @@ stockelper-airflow/
 **메인 클래스**: `StockReportCrawler`
 - `crawl_daily_report()`: 지정된 날짜 범위의 리포트 크롤링
 - `setup_driver()`: Selenium WebDriver 설정
-- `process_data()`: 스크래핑된 데이터 정리 및 구조화
+- `get_crawl_statistics()`: 크롤링 통계 조회
 
 ### 기업 크롤러 모듈
 
@@ -74,7 +103,7 @@ stockelper-airflow/
 - 주식 목록을 위한 FinanceDataReader 통합
 - REST API 데이터 수집
 - MongoDB upsert 작업
-- 지수 백오프를 사용한 재시도 메커니즘
+- 재시도 메커니즘
 - 개발용 테스트 모드
 
 **주요 함수**:
@@ -111,12 +140,13 @@ stockelper-airflow/
    ```
 
 4. **Airflow 웹 UI 접속**:
-   - URL: `http://localhost:8080`
-   - 기본 자격증명: `admin/admin`
+   - URL: `http://localhost:21003`
+   - 기본 자격증명: `.env` 파일에서 설정 가능
+   - 네트워크: `stockelper` 공유 네트워크 사용
 
 5. **서비스 중지**:
    ```bash
-   ./scripts/stop.sh
+   docker compose down
    ```
 
 ### 수동 설치
@@ -160,15 +190,19 @@ Docker 없이 설치하려는 경우:
 
 ```bash
 # MongoDB 설정
-MONGODB_URI=mongodb://localhost:27017/
+MONGODB_URI=mongodb+srv://stockelper:YOUR_PASSWORD@stockelper.btl2cdx.mongodb.net/
+MONGO_DATABASE=stockelper
 
-# Airflow 설정
-AIRFLOW__CORE__EXECUTOR=SequentialExecutor
-AIRFLOW__CORE__LOAD_EXAMPLES=False
-AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8080
+# Airflow Secret Key
+AIRFLOW_SECRET_KEY=change-this-secret-key-in-production
 
-# 기타 많은 옵션들...
+# Airflow Admin 계정 (선택사항)
+AIRFLOW_ADMIN_USERNAME=admin
+AIRFLOW_ADMIN_PASSWORD=admin
+AIRFLOW_ADMIN_EMAIL=admin@stockelper.com
 ```
+
+상세한 설정 방법은 [docs/ADMIN_USER_SETUP.md](docs/ADMIN_USER_SETUP.md)를 참고하세요.
 
 ## 📝 설정
 
@@ -186,10 +220,13 @@ DAG들은 다음 MongoDB 컬렉션을 생성하고 사용합니다:
 
 ### 로깅
 
-모든 모듈은 다음 설정으로 Python의 `logging` 모듈을 사용합니다:
-- **레벨**: INFO
+모든 모듈은 통합 로깅 설정(`modules/common/logging_config.py`)을 사용합니다:
+- **레벨**: INFO (변경 가능)
 - **형식**: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`
-- **출력**: 콘솔 및 Airflow 태스크 로그 모두
+- **출력**: 콘솔 및 Airflow 태스크 로그
+- **특징**: 중복 방지, Airflow 최적화
+
+상세한 사용법은 [docs/LOGGING_GUIDE.md](docs/LOGGING_GUIDE.md)를 참고하세요.
 
 ## 🔍 모니터링 및 디버깅
 
@@ -201,20 +238,14 @@ DAG들은 다음 MongoDB 컬렉션을 생성하고 사용합니다:
 
 ### 일반적인 문제
 
-1. **MongoDB 연결 실패**:
-   - `MONGODB_URI` 환경 변수 확인
-   - 네트워크 연결 확인
-   - MongoDB 서비스가 실행 중인지 확인
+문제 해결에 대한 상세한 가이드는 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)를 참고하세요.
 
-2. **Selenium WebDriver 문제**:
-   - Chrome/ChromeDriver 호환성 확인
-   - 헤드리스 모드 설정 확인
-   - 충분한 메모리 할당 확인
-
-3. **데이터 품질 문제**:
-   - 크롤링 성공률 모니터링
-   - 웹사이트 구조 변경 확인
-   - 데이터 완전성 검증
+**주요 문제**:
+- MongoDB 연결 실패
+- Selenium WebDriver 오류
+- DAG가 표시되지 않음
+- 포트 충돌
+- 메모리 부족
 
 ## 🛡️ 보안 고려사항
 
@@ -222,6 +253,20 @@ DAG들은 다음 MongoDB 컬렉션을 생성하고 사용합니다:
 - **환경 변수**: 모든 설정에 환경 변수 사용
 - **네트워크 보안**: MongoDB가 공용 인터넷에 노출되지 않도록 확인
 - **속도 제한**: 대상 웹사이트에 과부하를 주지 않도록 내장된 지연
+
+## 📚 문서
+
+전체 문서는 `docs/` 폴더에서 확인할 수 있습니다:
+
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - 빠른 시작 가이드
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - 시스템 아키텍처
+- **[DEVELOPMENT.md](docs/DEVELOPMENT.md)** - 개발 가이드
+- **[API_REFERENCE.md](docs/API_REFERENCE.md)** - API 레퍼런스
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 문제 해결
+- **[LOGGING_GUIDE.md](docs/LOGGING_GUIDE.md)** - 로깅 가이드
+- **[ADMIN_USER_SETUP.md](docs/ADMIN_USER_SETUP.md)** - Admin 설정
+- **[LOG_MANAGEMENT.md](docs/LOG_MANAGEMENT.md)** - 로그 관리
+- **[DOCKER_COMPOSE_CHANGES.md](docs/DOCKER_COMPOSE_CHANGES.md)** - Docker 변경사항
 
 ## 🤝 기여하기
 
@@ -232,13 +277,7 @@ DAG들은 다음 MongoDB 컬렉션을 생성하고 사용합니다:
 5. 브랜치에 푸시: `git push origin feature/new-feature`
 6. Pull Request 제출
 
-### 개발 가이드라인
-
-- PEP 8 스타일 가이드라인 준수
-- 포괄적인 로깅 추가
-- 오류 처리 및 재시도 포함
-- 새 모듈에 대한 단위 테스트 작성
-- 새 기능에 대한 문서 업데이트
+상세한 개발 가이드는 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)를 참고하세요.
 
 ## 📄 라이선스
 

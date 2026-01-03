@@ -5,6 +5,6 @@ This module provides functionality for crawling stock research reports
 from financial websites and storing them in MongoDB.
 """
 
-from .crawler import StockReportCrawler
+from .stock_report_crawler import StockReportCrawler
 
 __all__ = ['StockReportCrawler']

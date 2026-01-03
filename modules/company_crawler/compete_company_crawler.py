@@ -9,200 +9,184 @@ License: MIT
 """
 
 import os
+import sys
 import requests
-import pymongo
 import FinanceDataReader as fdr
-from bs4 import BeautifulSoup
 from time import sleep
 from datetime import datetime
 import json
-import logging
 from tqdm import tqdm
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Add module path for imports
+sys.path.insert(0, '/opt/airflow')
 
-# Environment variables and constants
-MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/")
-DB_NAME = "stockelper"
-COLLECTION_NAME = "competitors"
+# Import common logging and database connection
+from modules.common.logging_config import setup_logger
+from modules.common.db_connections import get_db_connection
 
-def get_mongo_collection():
+# Setup logger
+logger = setup_logger(__name__)
+
+class CompetitorCrawler:
     """
-    Connect to MongoDB and return the collection.
-    
-    Returns:
-        pymongo.Collection: MongoDB collection object or None if connection fails
+    A class to crawl competitor information for listed companies.
     """
-    mongo_uri = os.environ.get("MONGODB_URI", "mongodb://<MONGODB_HOST>:<MONGODB_PORT>/")
-    try:
-        # Set connection timeout to 5 seconds
-        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        client.server_info()  # Test connection
-        db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
-        logger.info("Successfully connected to MongoDB.")
-        return collection
-    except pymongo.errors.PyMongoError as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
-        logger.error("Please check:")
-        logger.error("- MongoDB server is running")
-        logger.error(f"- MONGODB_URI environment variable is set correctly (current: {mongo_uri})")
+    COLLECTION_NAME = "competitors"
+
+    def __init__(self, test_mode=False):
+        """
+        Initialize the CompetitorCrawler.
+
+        Args:
+            test_mode (bool): If True, run in test mode without DB connection.
+        """
+        self.test_mode = test_mode
+        self.collection = None
+        if not self.test_mode:
+            self._init_db()
+
+    def _init_db(self):
+        """Initialize the MongoDB connection."""
+        try:
+            db = get_db_connection()
+            self.collection = db[self.COLLECTION_NAME]
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
+
+    def get_all_stock_codes(self):
+        """
+        Get all listed company stock codes using FinanceDataReader.
+        
+        Returns:
+            list: List of stock codes from KOSPI, KOSDAQ, and KONEX
+        """
+        logger.info("Loading KOSPI, KOSDAQ, KONEX stock codes...")
+        try:
+            kospi = fdr.StockListing("KOSPI")
+            kosdaq = fdr.StockListing("KOSDAQ")
+            konex = fdr.StockListing("KONEX")
+            all_stocks = [kospi, kosdaq, konex]
+            
+            codes = [code for df in all_stocks for code in df['Code'].dropna().astype(str).tolist()]
+            logger.info(f"Found {len(codes)} stock codes in total.")
+            return codes
+        except Exception as e:
+            logger.error(f"Failed to load stock codes: {e}")
+            return []
+
+    def fetch_html(self, url, retries=3, delay=1):
+        """
+        Fetch HTML content from the given URL with retry mechanism.
+        
+        Args:
+            url (str): URL to fetch
+            retries (int): Number of retry attempts
+            delay (int): Delay between retries in seconds
+            
+        Returns:
+            bytes: HTML content or None if failed
+        """
+        for i in range(retries):
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()  # Raise exception if not 200 OK
+                return response.content
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"URL fetch error: {url} (attempt {i+1}/{retries}): {e}")
+                sleep(delay)
         return None
 
-def get_all_stock_codes():
-    """
-    Get all listed company stock codes using FinanceDataReader.
-    
-    Returns:
-        list: List of stock codes from KOSPI, KOSDAQ, and KONEX
-    """
-    logger.info("Loading KOSPI, KOSDAQ, KONEX stock codes...")
-    try:
-        kospi = fdr.StockListing("KOSPI")
-        kosdaq = fdr.StockListing("KOSDAQ")
-        konex = fdr.StockListing("KONEX")
-        all_stocks = [kospi, kosdaq, konex]
+    def parse_company_data(self, html_content):
+        """
+        Parse HTML content (JSON) to extract target company and competitor information.
         
-        # Ensure 'Code' column is string and remove missing values
-        codes = [code for df in all_stocks for code in df['Code'].dropna().astype(str).tolist()]
-        logger.info(f"Found {len(codes)} stock codes in total.")
-        return codes
-    except Exception as e:
-        logger.error(f"Failed to load stock codes: {e}")
-        return []
-
-def fetch_html(url, retries=3, delay=1):
-    """
-    Fetch HTML content from the given URL with retry mechanism.
-    
-    Args:
-        url (str): URL to fetch
-        retries (int): Number of retry attempts
-        delay (int): Delay between retries in seconds
-        
-    Returns:
-        bytes: HTML content or None if failed
-    """
-    for i in range(retries):
+        Args:
+            html_content (bytes): HTML content containing JSON data
+            
+        Returns:
+            tuple: (target_company, competitors) where target_company is dict and competitors is list
+        """
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()  # Raise exception if not 200 OK
-            return response.content
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"URL fetch error: {url} (attempt {i+1}/{retries}): {e}")
-            sleep(delay)
-    return None
+            data = json.loads(html_content)
+            if not data.get("oDt_header"):
+                return None, []
 
-def parse_company_data(html_content):
-    """
-    Parse HTML content (JSON) to extract target company and competitor information.
-    
-    Args:
-        html_content (bytes): HTML content containing JSON data
-        
-    Returns:
-        tuple: (target_company, competitors) where target_company is dict and competitors is list
-    """
-    try:
-        data = json.loads(html_content)
-        if not data.get("oDt_header"):
+            target_company = None
+            competitors = []
+            
+            for company in data["oDt_header"]:
+                company_info = {
+                    "code": company.get("CMP_CD"),
+                    "name": company.get("CMP_KOR"),
+                    "market_value": company.get("MKT_VAL")
+                }
+                
+                if company.get("SEQ") == 1:
+                    target_company = company_info
+                else:
+                    competitors.append(company_info)
+                    
+            return target_company, competitors
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"JSON parsing error: {e}")
             return None, []
 
-        target_company = None
-        competitors = []
-        
-        for company in data["oDt_header"]:
-            company_info = {
-                "code": company.get("CMP_CD"),
-                "name": company.get("CMP_KOR"),
-                "market_value": company.get("MKT_VAL")
-            }
-            
-            if company.get("SEQ") == 1:
-                target_company = company_info
-            else:
-                competitors.append(company_info)
-                
-        return target_company, competitors
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"JSON parsing error: {e}")
-        return None, []
-
-def main(test_mode=False):
-    """
-    Main execution function: collect stock codes, crawl data, and save to DB or output JSON.
-    
-    Args:
-        test_mode (bool): If True, only process first 5 stocks and output JSON instead of saving to DB
-    """
-    # Connect to DB only if not in test mode
-    collection = None
-    if not test_mode:
-        collection = get_mongo_collection()
-        if collection is None:
+    def run(self):
+        """
+        Main execution function: collect stock codes, crawl data, and save to DB or output JSON.
+        """
+        codes = self.get_all_stock_codes()
+        if not codes:
+            logger.error("No stock codes found. Exiting.")
             return
+            
+        if self.test_mode:
+            codes = codes[:5]
+            logger.info(f"[TEST MODE] Processing only {len(codes)} stocks.")
 
-    codes = get_all_stock_codes()
-    if not codes:
-        logger.error("No stock codes found. Exiting.")
-        return
+        all_results = []
+        logger.info("Starting competitor information crawling...")
         
-    if test_mode:
-        codes = codes[:5]  # Only select 5 stocks for testing
-        logger.info(f"[TEST MODE] Processing only {len(codes)} stocks.")
+        for code in tqdm(codes, desc="Crawling Competitors"):
+            url = f"https://comp.wisereport.co.kr/company/ajax/cF6001.aspx?cmp_cd={code}&finGubun=MAIN&sec_cd=FG000&frq=Y"
+            html_content = self.fetch_html(url)
 
-    all_results = []
-    logger.info("Starting competitor information crawling...")
-    
-    for code in tqdm(codes, desc="Crawling Competitors"):
-        # Wisereport competitor data API endpoint
-        url = f"https://comp.wisereport.co.kr/company/ajax/cF6001.aspx?cmp_cd={code}&finGubun=MAIN&sec_cd=FG000&frq=Y"
-        html_content = fetch_html(url)
+            if not html_content:
+                logger.warning(f"[{code}] Data fetch failed. Skipping.")
+                continue
 
-        if not html_content:
-            logger.warning(f"[{code}] Data fetch failed. Skipping.")
-            continue
+            target_company, competitors = self.parse_company_data(html_content)
 
-        target_company, competitors = parse_company_data(html_content)
+            if not target_company or not target_company.get("code"):
+                logger.warning(f"[{code}] Parsing failed. No valid data found.")
+                continue
 
-        if not target_company or not target_company.get("code"):
-            logger.warning(f"[{code}] Parsing failed. No valid data found.")
-            continue
+            document = {
+                "_id": target_company["code"],
+                "target_company": target_company,
+                "competitors": competitors,
+                "last_crawled_at": datetime.utcnow().isoformat()
+            }
 
-        # Create document to save (convert datetime to ISO format string)
-        document = {
-            "_id": target_company["code"],
-            "target_company": target_company,
-            "competitors": competitors,
-            "last_crawled_at": datetime.utcnow().isoformat()
-        }
+            if self.test_mode:
+                all_results.append(document)
+            else:
+                try:
+                    self.collection.update_one(
+                        {"_id": document["_id"]},
+                        {"$set": document},
+                        upsert=True
+                    )
+                    logger.debug(f"[{code}] Successfully saved to database.")
+                except Exception as e:
+                    logger.error(f"[{code}] Database save failed: {e}")
+            
+            sleep(0.1)
 
-        if test_mode:
-            all_results.append(document)
+        if self.test_mode:
+            logger.info("--- Crawling Results (JSON Output) ---")
+            print(json.dumps(all_results, indent=2, ensure_ascii=False))
+            logger.info("[TEST MODE] JSON output completed.")
         else:
-            # Update in DB (Upsert: insert if not exists, update if exists)
-            try:
-                collection.update_one(
-                    {"_id": document["_id"]},
-                    {"$set": document},
-                    upsert=True
-                )
-                logger.debug(f"[{code}] Successfully saved to database.")
-            except pymongo.errors.PyMongoError as e:
-                logger.error(f"[{code}] Database save failed: {e}")
-        
-        sleep(0.1)  # Delay to reduce server load
-
-    if test_mode:
-        logger.info("--- Crawling Results (JSON Output) ---")
-        print(json.dumps(all_results, indent=2, ensure_ascii=False))
-        logger.info("[TEST MODE] JSON output completed.")
-    else:
-        logger.info("Competitor information crawling and database saving completed for all companies.")
-
-if __name__ == "__main__":
-    # For testing: main(test_mode=True)
-    # For actual DB saving: main(test_mode=False) or main()
-    main(test_mode=False)
+            logger.info("Competitor information crawling and database saving completed for all companies.")
