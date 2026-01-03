@@ -1,21 +1,30 @@
 """
-DART 36 Major Report Type Collection DAG
-======================================
+DART Major Reports -> Event/Sentiment Extraction (Universe Backfill) DAG
+======================================================================
 
-Updated Strategy (2026-01-03):
-- Collect 36 structured "major report" endpoints per company (no generic list/document parsing).
-- Store to the SAME PostgreSQL as `daily_stock_price` (Airflow Connection: postgres_default).
-- Run daily at 08:00 KST.
+Purpose:
+- After DART 36-type major reports have been collected into the SAME Postgres DB as `daily_stock_price`,
+  this DAG extracts event_type + sentiment_score (LLM) for UNIVERSE stocks only.
+- Output is stored into the same Postgres DB table: `dart_event_extractions`.
+
+Notes:
+- This DAG is MANUAL (schedule=None). It is intended to be run after the 20-year major-report backfill.
+- For daily incremental extraction, see `dart_disclosure_collection_36_types` DAG.
 """
 
 from __future__ import annotations
 
+import json as _json
+from datetime import datetime
+
 import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
+from sqlalchemy import text
 
 from modules.common.airflow_settings import get_required_setting, get_setting
 from modules.common.logging_config import setup_logger
+from modules.postgres.postgres_connector import get_postgres_engine
 
 logger = setup_logger(__name__)
 
@@ -25,14 +34,15 @@ default_args = {
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 3,
-    "retry_delay": pendulum.duration(minutes=5),
-    "execution_timeout": pendulum.duration(hours=2),
+    "retries": 1,
+    "retry_delay": pendulum.duration(minutes=10),
+    # Backfill can be long-running (OpenAI + OpenDART calls)
+    "execution_timeout": pendulum.duration(hours=24),
 }
 
 
 def load_universe_template(**context):
-    """Load AI-sector universe template JSON (used for event/sentiment extraction only)."""
+    """Load AI-sector universe template JSON and push stock_codes to XCom."""
     import json
     from pathlib import Path
 
@@ -42,7 +52,6 @@ def load_universe_template(**context):
     path = Path(str(universe_path)).expanduser()
     data = json.loads(path.read_text(encoding="utf-8"))
     stocks = data.get("stocks") or []
-    corp_codes = [s["corp_code"] for s in stocks if isinstance(s, dict) and s.get("corp_code")]
     stock_codes = [
         str(s.get("stock_code") or "").strip().zfill(6)
         for s in stocks
@@ -50,53 +59,16 @@ def load_universe_template(**context):
     ]
     stock_codes = [c for c in stock_codes if c.isdigit() and len(c) == 6]
 
-    ti = context["task_instance"]
+    ti = context["ti"]
     ti.xcom_push(key="universe_path", value=str(path))
-    ti.xcom_push(key="corp_codes", value=corp_codes)
     ti.xcom_push(key="stock_codes", value=stock_codes)
-    ti.xcom_push(key="universe_size", value=len(corp_codes))
-
-    logger.info("Loaded universe: %s stocks (path=%s)", len(corp_codes), path)
-    return len(corp_codes)
-
-
-def collect_36_major_reports(**context):
-    """Collect 36 major report types for ALL listed companies and store to Postgres(postgres_default)."""
-    from stockelper_kg.collectors.dart_major_reports import DartMajorReportCollector
-    from modules.postgres.postgres_connector import get_postgres_engine
-
-    api_key = get_required_setting("OPEN_DART_API_KEY")
-    engine = get_postgres_engine(conn_id="postgres_default")
-
-    lookback_days = int(get_setting("DART36_LOOKBACK_DAYS", "30"))
-    # Daily runs should use "today" in Asia/Seoul as the window end date.
-    end_date = pendulum.now("Asia/Seoul").format("YYYYMMDD")
-
-    collector = DartMajorReportCollector(
-        api_key=api_key,
-        engine=engine,
-        sleep_seconds=float(get_setting("DART36_SLEEP_SECONDS", "0.2")),
-        timeout_seconds=float(get_setting("DART36_TIMEOUT_SECONDS", "30")),
-        max_retries=int(get_setting("DART36_MAX_RETRIES", "3")),
-    )
-
-    logger.info("Starting DART 36-type collection for ALL listed companies (lookback_days=%s)", lookback_days)
-    result = collector.collect_all_listed(
-        lookback_days=lookback_days,
-        end_date=str(end_date),
-    )
-    context["ti"].xcom_push(key="collect_result", value=result)
-    return True
+    ti.xcom_push(key="universe_size", value=len(stock_codes))
+    logger.info("Loaded universe: %s stocks (path=%s)", len(stock_codes), path)
+    return len(stock_codes)
 
 
-def extract_events(**context):
-    """Extract events/sentiment for UNIVERSE stocks only and store to Postgres(postgres_default)."""
-    import json as _json
-    from datetime import datetime, timedelta
-
-    from sqlalchemy import text
-
-    from modules.postgres.postgres_connector import get_postgres_engine
+def extract_events_backfill(**context):
+    """Backfill extraction for universe stocks into Postgres dart_event_extractions."""
     from modules.dart_disclosure.llm_extractor import OpenAIEventExtractor
     from modules.dart_disclosure.opendart_api import (
         OpenDartApiClient,
@@ -111,13 +83,17 @@ def extract_events(**context):
     stock_codes = [c for c in stock_codes if c.isdigit() and len(c) == 6]
 
     if not stock_codes:
-        logger.warning("No universe stock_codes loaded; skipping extract_events.")
+        logger.warning("No universe stock_codes loaded; skipping.")
         return True
 
-    # Extract window: default last 3 days (overridable)
-    lookback_days = int(get_setting("DART_EVENT_LOOKBACK_DAYS", "3"))
-    end_dt = pendulum.now("Asia/Seoul").date()
-    start_dt = end_dt - timedelta(days=lookback_days)
+    years = int(get_setting("DART_EVENT_BACKFILL_YEARS", "20"))
+    end_s = str(get_setting("DART_EVENT_BACKFILL_END_DATE", pendulum.now("Asia/Seoul").format("YYYYMMDD")) or "")
+    end_s = end_s.replace("-", "")
+    if len(end_s) != 8 or not end_s.isdigit():
+        raise ValueError(f"Invalid DART_EVENT_BACKFILL_END_DATE: {end_s!r}")
+
+    end_dt = datetime.strptime(end_s, "%Y%m%d")
+    start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(years=years)
 
     engine = get_postgres_engine(conn_id="postgres_default")
 
@@ -142,24 +118,19 @@ def extract_events(**context):
     CREATE INDEX IF NOT EXISTS idx_dart_event_extractions_stock_date ON dart_event_extractions(stock_code, rcept_dt);
     CREATE INDEX IF NOT EXISTS idx_dart_event_extractions_event_type ON dart_event_extractions(event_type);
     """
-
     with engine.begin() as conn:
         for stmt in ddl.strip().split(";"):
             s = stmt.strip()
             if s:
                 conn.execute(text(s))
 
-    # Map report_type/category -> ontology event_type hint (kept consistent with llm_extractor)
     def _event_type_hint(report_type: str | None, category: str | None) -> str:
         rt = (report_type or "").strip()
         cat = (category or "").strip()
-
-        # Special cases
         if rt == "crDecsn":
             return "CAPITAL_STRUCTURE_CHANGE"
         if rt in {"cmpDvDecsn", "cmpDvmgDecsn"}:
             return "STRATEGY_SPINOFF"
-
         if cat in {"증자감자", "사채발행"}:
             return "CAPITAL_RAISE"
         if cat == "자기주식":
@@ -171,11 +142,9 @@ def extract_events(**context):
         if cat in {"소송"}:
             return "LEGAL_LITIGATION"
         if cat in {"기업상태", "채권은행"}:
-            # includes default/rehabilitation/bankruptcy etc.
             return "CRISIS_EVENT"
         return "OTHER"
 
-    # Find all major-report tables (dart_*) and pick universe rows in window, excluding already extracted.
     with engine.begin() as conn:
         tbl_rows = conn.execute(
             text(
@@ -187,10 +156,10 @@ def extract_events(**context):
                 """
             )
         ).fetchall()
+    table_names = [r[0] for r in tbl_rows if r and r[0] != "dart_event_extractions"]
 
-    table_names = [r[0] for r in tbl_rows]
     if not table_names:
-        logger.warning("No dart_* tables found in Postgres; skipping extract_events.")
+        logger.warning("No dart_* tables found; did you run the major-report backfill first?")
         return True
 
     api_key = get_required_setting("OPEN_DART_API_KEY")
@@ -201,10 +170,6 @@ def extract_events(**context):
     skipped = 0
 
     for table_name in table_names:
-        # Skip our output table
-        if table_name == "dart_event_extractions":
-            continue
-
         q = text(
             f"""
             SELECT t.rcept_no, t.stock_code, t.corp_code, t.corp_name, t.rcept_dt, t.report_type, t.category
@@ -212,9 +177,7 @@ def extract_events(**context):
             WHERE t.stock_code = ANY(:stock_codes)
               AND t.rcept_dt >= :start_dt
               AND t.rcept_dt <= :end_dt
-              AND NOT EXISTS (
-                SELECT 1 FROM dart_event_extractions e WHERE e.rcept_no = t.rcept_no
-              )
+              AND NOT EXISTS (SELECT 1 FROM dart_event_extractions e WHERE e.rcept_no = t.rcept_no)
             ORDER BY t.rcept_dt ASC
             """
         )
@@ -222,7 +185,7 @@ def extract_events(**context):
         with engine.begin() as conn:
             rows = conn.execute(
                 q,
-                {"stock_codes": stock_codes, "start_dt": start_dt, "end_dt": end_dt},
+                {"stock_codes": stock_codes, "start_dt": start_dt.date(), "end_dt": end_dt.date()},
             ).fetchall()
 
         for r in rows:
@@ -236,7 +199,6 @@ def extract_events(**context):
 
             hint = _event_type_hint(report_type, category)
             url = build_dart_viewer_url(rcept_no)
-            # OpenDART uses YYYYMMDD for rcept_dt; our table is DATE already.
             rcept_dt_str = rcept_dt.strftime("%Y%m%d") if rcept_dt else ""
             reported_iso = normalize_iso_date(rcept_dt_str) if rcept_dt_str else pendulum.now("Asia/Seoul").format("YYYY-MM-DD")
 
@@ -294,42 +256,47 @@ def extract_events(**context):
                 )
             inserted += 1
 
-    logger.info("extract_events done: inserted=%s skipped=%s window=%s..%s universe=%s", inserted, skipped, start_dt, end_dt, len(stock_codes))
+    logger.info(
+        "extract_events_backfill done: inserted=%s skipped=%s range=%s..%s universe=%s",
+        inserted,
+        skipped,
+        start_dt.format("YYYY-MM-DD"),
+        end_dt.strftime("%Y-%m-%d"),
+        len(stock_codes),
+    )
+
+    ti.xcom_push(
+        key="backfill_summary",
+        value={
+            "start_date": start_dt.format("YYYYMMDD"),
+            "end_date": end_s,
+            "years": years,
+            "inserted": inserted,
+            "skipped": skipped,
+            "universe_size": len(stock_codes),
+        },
+    )
     return True
 
 
-def pattern_matching(**context):
-    """Placeholder (future): Neo4j pattern matching and user notification."""
-    logger.info("pattern_matching placeholder - to be implemented")
-    return True
+def report(**context):
+    summary = context["ti"].xcom_pull(task_ids="extract_events_backfill", key="backfill_summary")
+    logger.info("Backfill summary: %s", summary)
 
 
 with DAG(
-    dag_id="dart_disclosure_collection_36_types",
+    dag_id="dart_event_extraction_universe_backfill",
     default_args=default_args,
-    description="Collect DART 36 major report types for ALL listed companies (Postgres=postgres_default)",
-    schedule="0 8 * * *",  # 08:00 KST
+    description="(BACKFILL) Extract event_type/sentiment for universe stocks from dart_* tables into Postgres",
+    schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
-    tags=["dart", "disclosure", "postgres", "36-types"],
+    tags=["dart", "event", "sentiment", "postgres", "backfill"],
 ) as dag:
-    t_universe = PythonOperator(
-        task_id="load_universe_template",
-        python_callable=load_universe_template,
-    )
-    t_collect = PythonOperator(
-        task_id="collect_36_major_reports",
-        python_callable=collect_36_major_reports,
-    )
-    t_extract = PythonOperator(
-        task_id="extract_events",
-        python_callable=extract_events,
-    )
-    t_match = PythonOperator(
-        task_id="pattern_matching",
-        python_callable=pattern_matching,
-    )
+    t_universe = PythonOperator(task_id="load_universe_template", python_callable=load_universe_template)
+    t_extract = PythonOperator(task_id="extract_events_backfill", python_callable=extract_events_backfill)
+    t_report = PythonOperator(task_id="report", python_callable=report)
 
-    t_universe >> t_collect >> t_extract >> t_match
+    t_universe >> t_extract >> t_report
 
 
