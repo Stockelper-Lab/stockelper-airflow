@@ -8,7 +8,7 @@ from airflow.operators.python import PythonOperator
 # 분리된 모듈과 오퍼레이터 임포트
 from modules.stock_price.fetch_stock_operators import FetchStockDataOperator
 from modules.stock_price.stock_to_db import (
-    get_missing_symbols,
+    get_symbols_to_update,
     load_data_to_postgres,
     setup_database_table,
 )
@@ -42,19 +42,19 @@ with DAG(
         python_callable=setup_database_table,
     )
 
-    # Task 2: 누락된 종목 리스트 가져오기
+    # Task 2: (신규 종목 + 기존 종목 최신) 업데이트 대상 리스트 가져오기
     get_symbols_task = PythonOperator(
-        task_id="get_missing_symbols",
-        python_callable=get_missing_symbols,
+        task_id="get_symbols_to_update",
+        python_callable=get_symbols_to_update,
         do_xcom_push=True,
     )
 
     # Task 3: 각 종목별로 데이터 가져오기 (동적 생성)
-    # FetchStockDataOperator.expand는 get_symbols_task가 반환한 리스트의
-    # 각 종목 코드(symbol)에 대해 동적으로 태스크를 생성합니다.
+    # get_symbols_task는 [{"symbol": "...", "start_date": "YYYY-MM-DD"}, ...] 형태를 반환하고,
+    # expand_kwargs로 각 항목을 오퍼레이터 인자로 매핑합니다.
     fetch_data_task = FetchStockDataOperator.partial(
         task_id="fetch_and_process_stock_data"
-    ).expand(symbol=get_symbols_task.output)
+    ).expand_kwargs(get_symbols_task.output)
 
     # Task 4: 처리된 모든 데이터를 DB에 로드
     load_data_task = PythonOperator(
