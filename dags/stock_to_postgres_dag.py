@@ -6,7 +6,7 @@ from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
 # 분리된 모듈과 오퍼레이터 임포트
-from modules.stock_price.fetch_stock_operators import FetchStockDataOperator
+from modules.stock_price.fetch_stock_operators import FetchStockBatchOperator
 from modules.stock_price.stock_to_db import (
     get_symbols_to_update,
     load_data_to_postgres,
@@ -49,10 +49,10 @@ with DAG(
         do_xcom_push=True,
     )
 
-    # Task 3: 각 종목별로 데이터 가져오기 (동적 생성)
-    # get_symbols_task는 [{"symbol": "...", "data_start_date": "YYYY-MM-DD", "data_end_date": "YYYY-MM-DD"}, ...] 형태를 반환하고,
-    # expand_kwargs로 각 항목을 오퍼레이터 인자로 매핑합니다.
-    fetch_data_task = FetchStockDataOperator.partial(
+    # Task 3: 배치 단위로 데이터 가져오기 (동적 생성)
+    # get_symbols_task는 [{"batch": [{"symbol": "...", "data_start_date": "...", "data_end_date": "..."}, ...]}, ...] 형태를 반환하고,
+    # expand_kwargs로 각 batch를 오퍼레이터 인자로 매핑합니다. (Airflow core.max_map_length 기본 1024 제한 회피)
+    fetch_data_task = FetchStockBatchOperator.partial(
         task_id="fetch_and_process_stock_data"
     ).expand_kwargs(get_symbols_task.output)
 

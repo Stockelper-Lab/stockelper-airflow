@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from sqlalchemy import text
 import FinanceDataReader as fdr
+import requests
 from io import StringIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -23,7 +24,7 @@ def get_confirmed_eod_end_date() -> str:
     - Use KST time to decide the *latest possible* EOD date:
       - before cutoff hour (default 18:00 KST): use yesterday
       - after cutoff hour: allow today
-    - Then query FinanceDataReader(KRX) for a stable ticker and pick the last available date.
+    - Then query KRX's `max_work_dt` endpoint (no-login) to get the latest trading date.
 
     This avoids mixing "intraday" / "partial today" rows when the DAG runs at 09:00 KST.
     """
@@ -33,22 +34,31 @@ def get_confirmed_eod_end_date() -> str:
     cutoff = now_kst.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
     asof_date = now_kst.date() if now_kst >= cutoff else (now_kst.date() - timedelta(days=1))
 
-    cal_ticker = (get_setting("STOCK_PRICE_CAL_TICKER", os.getenv("STOCK_PRICE_CAL_TICKER", "005930")) or "005930").strip() or "005930"
-    cal_lookback_days = int(get_setting("STOCK_PRICE_CAL_LOOKBACK_DAYS", os.getenv("STOCK_PRICE_CAL_LOOKBACK_DAYS", "30")))
-
-    start = (asof_date - timedelta(days=cal_lookback_days)).strftime("%Y-%m-%d")
-    end = asof_date.strftime("%Y-%m-%d")
-
     try:
-        df = fdr.DataReader(f"KRX:{cal_ticker}", start=start, end=end)
-        if df is None or df.empty:
-            log.warning("EOD calendar probe returned empty; fallback end=%s", end)
-            return end
-        last_dt = pd.Timestamp(df.index.max()).date()
-        return last_dt.strftime("%Y-%m-%d")
+        headers = {
+            "User-Agent": "Chrome/78.0.3904.87 Safari/537.36",
+            "Referer": "http://data.krx.co.kr/",
+        }
+        url = (
+            "http://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
+            "?baseName=krx.mdc.i18n.component&key=B128.bld"
+        )
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        max_work_dt = j["result"]["output"][0]["max_work_dt"]  # YYYYMMDD
+
+        # cutoff 이전에는 today 데이터가 완전히 확정되지 않을 수 있으므로 asof_date로 상한을 둔다.
+        asof_yyyymmdd = asof_date.strftime("%Y%m%d")
+        if isinstance(max_work_dt, str) and max_work_dt.isdigit():
+            max_work_dt = min(max_work_dt, asof_yyyymmdd)
+            return f"{max_work_dt[:4]}-{max_work_dt[4:6]}-{max_work_dt[6:8]}"
+
+        log.warning("EOD max_work_dt probe returned unexpected payload; fallback=%s", asof_yyyymmdd)
+        return asof_date.strftime("%Y-%m-%d")
     except Exception as exc:
-        log.warning("EOD end_date probe failed; fallback end=%s err=%s", end, exc)
-        return end
+        log.warning("EOD end_date probe failed; fallback=%s err=%s", asof_date, exc)
+        return asof_date.strftime("%Y-%m-%d")
 
 
 def setup_database_table():
@@ -80,7 +90,7 @@ def setup_database_table():
     log.info(f"Table '{TABLE_NAME}' is ready.")
 
 
-def get_symbols_to_update() -> list[dict[str, str]]:
+def get_symbols_to_update() -> list[dict[str, list[dict[str, str]]]]:
     """
     매일 실행 기준으로, "신규 상장 종목" + "기존 종목의 최신 주가"를 모두 수집하기 위한
     (symbol, data_start_date, data_end_date) 작업 리스트를 반환합니다.
@@ -88,22 +98,67 @@ def get_symbols_to_update() -> list[dict[str, str]]:
     - 신규 종목(테이블에 심볼 없음): (listing date 또는 DEFAULT_START_DATE)부터 적재
     - 기존 종목: 해당 종목의 마지막 date 이후부터(today까지) 증분 적재
 
-    반환 형식(동적 매핑용):
+    반환 형식(동적 매핑용, batch 단위):
+    - Airflow `core.max_map_length` 기본값(1024)을 초과하지 않도록, 심볼 작업을 N개씩 묶어서 반환합니다.
     [
-      {"symbol": "035420", "data_start_date": "2025-12-31", "data_end_date": "2026-01-02"},
+      {"batch": [
+        {"symbol": "035420", "data_start_date": "2025-12-31", "data_end_date": "2026-01-02"},
+        ...
+      ]},
       ...
     ]
     """
     engine = get_postgres_engine()
 
+    # NOTE:
+    # - Airflow 동적 매핑(expand_kwargs)은 upstream이 빈 리스트를 반환하면,
+    #   mapped task(여기서는 fetch_and_process_stock_data)가 0개로 생성되며 SKIPPED 처리됩니다.
+    # - 따라서 심볼 목록 조회 실패 시 "[] 반환"은 전체 파이프라인을 조용히 SKIP 시키는 부작용이 큽니다.
+    #
+    # KRX 사이트(data.krx.co.kr)가 세션/쿠키 요구로 `LOGOUT`(400)을 응답하는 경우가 있어,
+    # FinanceDataReader의 `StockListing("KRX")`가 JSONDecodeError로 실패할 수 있습니다.
+    # 기본값을 더 안정적인 `KRX-DESC`로 두고, 그래도 실패하면 DB에 이미 존재하는 심볼로 fallback 합니다.
+    listing_market = (
+        get_setting(
+            "STOCK_PRICE_LISTING_MARKET",
+            os.getenv("STOCK_PRICE_LISTING_MARKET", "KRX-DESC"),
+        )
+        or "KRX-DESC"
+    ).strip() or "KRX-DESC"
+
     try:
-        krx_stocks = fdr.StockListing("KRX")
+        krx_stocks = fdr.StockListing(listing_market)
         krx_stocks["Code"] = krx_stocks["Code"].astype(str).str.zfill(6)
         all_symbols = krx_stocks["Code"].tolist()
-        log.info("Fetched %s symbols from KRX.", len(all_symbols))
+        log.info(
+            "Fetched %s symbols from listing_market=%s.",
+            len(all_symbols),
+            listing_market,
+        )
     except Exception as e:
-        log.error(f"Failed to fetch stock listings from KRX: {e}")
-        return []
+        log.error("Failed to fetch stock listings from %s: %s", listing_market, e)
+
+        # Fallback: DB에 이미 적재된 심볼 목록으로 계속 진행(신규 상장 종목은 누락될 수 있음)
+        db_symbols: list[str] = []
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text(f"SELECT DISTINCT symbol FROM {TABLE_NAME}"))
+                db_symbols = [str(r[0]).zfill(6) for r in rows if r and r[0] is not None]
+        except Exception as db_e:
+            log.error("Also failed to fetch symbol list from DB for fallback: %s", db_e)
+
+        if not db_symbols:
+            # 여기까지 오면 심볼을 만들 방법이 없으므로 실패로 처리(=리트라이/알람 가능)
+            raise RuntimeError(
+                f"Unable to fetch symbol listing from {listing_market} and DB fallback returned empty."
+            ) from e
+
+        log.warning(
+            "Falling back to %s symbols from DB (new listings may be missed).",
+            len(db_symbols),
+        )
+        all_symbols = db_symbols
+        krx_stocks = pd.DataFrame({"Code": all_symbols})
 
     # Global end_date: last confirmed EOD close date for KRX (YYYY-MM-DD)
     end_date = get_confirmed_eod_end_date()
@@ -121,6 +176,20 @@ def get_symbols_to_update() -> list[dict[str, str]]:
     except Exception as e:
         log.warning("Could not fetch existing symbol max(date); assuming empty. err=%s", e)
         last_date_by_symbol = {}
+
+    # listing_market 결과에 없는(예: 과거 적재된 심볼/특수 종목 등) 심볼도 DB에 존재한다면 유지
+    if last_date_by_symbol:
+        db_symbols = {str(s).zfill(6) for s in last_date_by_symbol.keys()}
+        merged_symbols = sorted(set(all_symbols) | db_symbols)
+        if len(merged_symbols) != len(all_symbols):
+            log.warning(
+                "listing_market=%s returned %s symbols, DB has %s; using union=%s symbols.",
+                listing_market,
+                len(all_symbols),
+                len(last_date_by_symbol),
+                len(merged_symbols),
+            )
+        all_symbols = merged_symbols
 
     # 운영 안정성을 위해 최근 N일을 다시 당겨와 upsert(누락/휴장/지연 대비)
     lookback_days = int(get_setting("STOCK_PRICE_LOOKBACK_DAYS", os.getenv("STOCK_PRICE_LOOKBACK_DAYS", "2")))
@@ -142,6 +211,9 @@ def get_symbols_to_update() -> list[dict[str, str]]:
 
     for sym in all_symbols:
         max_date = last_date_by_symbol.get(sym)
+        # 이미 최신 거래일(end_date)까지 적재된 심볼은 스킵 (증분 적재)
+        if max_date is not None and max_date >= end_date_dt:
+            continue
         if max_date is None:
             start = listing_date_by_symbol.get(sym) or DEFAULT_START_DATE
         else:
@@ -160,11 +232,25 @@ def get_symbols_to_update() -> list[dict[str, str]]:
 
         tasks.append({"symbol": sym, "data_start_date": start, "data_end_date": end_date})
 
-    log.info("Prepared %s update tasks (lookback_days=%s).", len(tasks), lookback_days)
+    batch_size = int(get_setting("STOCK_PRICE_TASK_BATCH_SIZE", os.getenv("STOCK_PRICE_TASK_BATCH_SIZE", "200")))
+    if batch_size <= 0:
+        batch_size = 200
 
-    # For testing, you can uncomment the line below to process a small subset.
-    # return tasks[:50]
-    return tasks
+    batches: list[dict[str, list[dict[str, str]]]] = [
+        {"batch": tasks[i : i + batch_size]} for i in range(0, len(tasks), batch_size)
+    ]
+    log.info(
+        "Prepared %s update tasks into %s batches (batch_size=%s, lookback_days=%s).",
+        len(tasks),
+        len(batches),
+        batch_size,
+        lookback_days,
+    )
+
+    # For testing, you can uncomment the lines below to process a small subset.
+    # tasks = tasks[:50]
+    # return [{"batch": tasks}]
+    return batches
 
 
 def bulk_upsert(df: pd.DataFrame):
