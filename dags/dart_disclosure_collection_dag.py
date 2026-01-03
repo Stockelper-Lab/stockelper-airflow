@@ -61,6 +61,8 @@ def collect_36_major_reports(**context):
     postgres_conn = get_required_setting("LOCAL_POSTGRES_CONN_STRING")
 
     lookback_days = int(get_setting("DART36_LOOKBACK_DAYS", "30"))
+    # Daily runs should use "today" in Asia/Seoul as the window end date.
+    end_date = pendulum.now("Asia/Seoul").format("YYYYMMDD")
 
     ti = context["task_instance"]
     universe_path = ti.xcom_pull(key="universe_path", task_ids="load_universe_template")
@@ -77,6 +79,7 @@ def collect_36_major_reports(**context):
     result = collector.collect_universe(
         universe_path=str(universe_path),
         lookback_days=lookback_days,
+        end_date=str(end_date),
     )
     ti.xcom_push(key="collect_result", value=result)
     return True
