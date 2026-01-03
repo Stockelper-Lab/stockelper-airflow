@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from modules.postgres.postgres_connector import get_postgres_engine
+from modules.common.airflow_settings import get_setting
 
 log = logging.getLogger(__name__)
 
@@ -28,12 +29,12 @@ def get_confirmed_eod_end_date() -> str:
     """
 
     now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
-    cutoff_hour = int(os.getenv("STOCK_PRICE_EOD_CUTOFF_HOUR", "18"))
+    cutoff_hour = int(get_setting("STOCK_PRICE_EOD_CUTOFF_HOUR", os.getenv("STOCK_PRICE_EOD_CUTOFF_HOUR", "18")))
     cutoff = now_kst.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
     asof_date = now_kst.date() if now_kst >= cutoff else (now_kst.date() - timedelta(days=1))
 
-    cal_ticker = os.getenv("STOCK_PRICE_CAL_TICKER", "005930").strip() or "005930"
-    cal_lookback_days = int(os.getenv("STOCK_PRICE_CAL_LOOKBACK_DAYS", "30"))
+    cal_ticker = (get_setting("STOCK_PRICE_CAL_TICKER", os.getenv("STOCK_PRICE_CAL_TICKER", "005930")) or "005930").strip() or "005930"
+    cal_lookback_days = int(get_setting("STOCK_PRICE_CAL_LOOKBACK_DAYS", os.getenv("STOCK_PRICE_CAL_LOOKBACK_DAYS", "30")))
 
     start = (asof_date - timedelta(days=cal_lookback_days)).strftime("%Y-%m-%d")
     end = asof_date.strftime("%Y-%m-%d")
@@ -122,7 +123,7 @@ def get_symbols_to_update() -> list[dict[str, str]]:
         last_date_by_symbol = {}
 
     # 운영 안정성을 위해 최근 N일을 다시 당겨와 upsert(누락/휴장/지연 대비)
-    lookback_days = int(os.getenv("STOCK_PRICE_LOOKBACK_DAYS", "2"))
+    lookback_days = int(get_setting("STOCK_PRICE_LOOKBACK_DAYS", os.getenv("STOCK_PRICE_LOOKBACK_DAYS", "2")))
 
     tasks: list[dict[str, str]] = []
 
