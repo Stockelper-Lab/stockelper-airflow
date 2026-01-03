@@ -3,61 +3,72 @@
     "corp_name": "네이버",
     "dart_corp_name": "NAVER",
     "stock_code": "035420",
-    "tags": ["ai", "bigtech", "meeting-20251208"]
+    "tags": ["ai", "bigtech"]
   },
   {
     "corp_name": "카카오",
     "stock_code": "035720",
-    "tags": ["ai", "bigtech", "meeting-20251208"]
+    "tags": ["ai", "bigtech"]
   },
   {
     "corp_name": "이스트소프트",
     "stock_code": "047560",
-    "tags": ["ai", "software", "meeting-20251208"]
+    "tags": ["ai", "software"]
   },
   {
     "corp_name": "와이즈넛",
-    "tags": ["ai", "software", "meeting-20251208"]
+    "stock_code": "096250",
+    "tags": ["ai", "software"]
   },
   {
     "corp_name": "코난테크놀로지",
-    "tags": ["ai", "software", "meeting-20251208"]
+    "stock_code": "402030",
+    "tags": ["ai", "software"]
   },
   {
     "corp_name": "마음AI",
-    "tags": ["ai", "software", "meeting-20251208"]
+    "stock_code": "377480",
+    "tags": ["ai", "software"]
   },
   {
     "corp_name": "엑셈",
-    "tags": ["ai", "software", "meeting-20251208"]
+    "stock_code": "205100",
+    "tags": ["ai", "software"]
   },
   {
     "corp_name": "플리토",
-    "tags": ["ai", "data", "meeting-20251208"]
+    "stock_code": "300080",
+    "tags": ["ai", "data"]
   },
   {
     "corp_name": "알체라",
-    "tags": ["ai", "vision", "meeting-20251208"]
+    "stock_code": "347860",
+    "tags": ["ai", "vision"]
   },
   {
     "corp_name": "한국전자인증",
-    "tags": ["ai", "security", "meeting-20251208"]
+    "stock_code": "041460",
+    "tags": ["ai", "security"]
   },
   {
     "corp_name": "레인보우로보틱스",
-    "tags": ["ai", "robotics", "meeting-20251208"]
+    "stock_code": "277810",
+    "tags": ["ai", "robotics"]
   },
   {
     "corp_name": "유진로봇",
-    "tags": ["ai", "robotics", "meeting-20251208"]
+    "stock_code": "056080",
+    "tags": ["ai", "robotics"]
   },
   {
     "corp_name": "로보로보",
-    "tags": ["ai", "robotics", "meeting-20251208"]
+    "stock_code": "215100",
+    "tags": ["ai", "robotics"]
   },
   {
     "corp_name": "큐렉소",
-    "tags": ["ai", "robotics", "meeting-20251208"]
+    "stock_code": "060280",
+    "tags": ["ai", "robotics"]
   }
 ]
 
