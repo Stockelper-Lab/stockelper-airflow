@@ -50,7 +50,7 @@ with DAG(
     )
 
     # Task 3: 각 종목별로 데이터 가져오기 (동적 생성)
-    # get_symbols_task는 [{"symbol": "...", "start_date": "YYYY-MM-DD"}, ...] 형태를 반환하고,
+    # get_symbols_task는 [{"symbol": "...", "data_start_date": "YYYY-MM-DD", "data_end_date": "YYYY-MM-DD"}, ...] 형태를 반환하고,
     # expand_kwargs로 각 항목을 오퍼레이터 인자로 매핑합니다.
     fetch_data_task = FetchStockDataOperator.partial(
         task_id="fetch_and_process_stock_data"

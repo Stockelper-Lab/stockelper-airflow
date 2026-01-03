@@ -18,20 +18,29 @@ class FetchStockDataOperator(BaseOperator):
     단일 주식 종목의 데이터를 가져와서 전처리하고 XCom으로 DataFrame을 반환하는 오퍼레이터
     """
 
-    template_fields: tuple[str, ...] = ("symbol", "start_date", "end_date")
+    # NOTE: Do NOT use `start_date`/`end_date` as template fields here.
+    # Airflow BaseOperator already has reserved fields with those names, and
+    # dynamic task mapping serialization will fail ("Cannot template BaseOperator field").
+    template_fields: tuple[str, ...] = ("symbol", "data_start_date", "data_end_date")
 
-    def __init__(self, symbol: str, start_date: str | None = None, end_date: str | None = None, **kwargs):
+    def __init__(
+        self,
+        symbol: str,
+        data_start_date: str | None = None,
+        data_end_date: str | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.symbol = symbol
-        self.start_date = start_date
-        self.end_date = end_date
+        self.data_start_date = data_start_date
+        self.data_end_date = data_end_date
 
     def execute(self, context: Context) -> pd.DataFrame | None:
         """
         symbol에 해당하는 주식 데이터를 가져와 전처리 후 DataFrame을 반환합니다.
         """
-        to_date = (self.end_date or datetime.now().strftime("%Y-%m-%d")).strip()
-        start_date = (self.start_date or DEFAULT_START_DATE).strip()
+        to_date = (self.data_end_date or datetime.now().strftime("%Y-%m-%d")).strip()
+        start_date = (self.data_start_date or DEFAULT_START_DATE).strip()
         log.info("Fetching and processing data for symbol=%s start=%s end=%s", self.symbol, start_date, to_date)
 
         try:

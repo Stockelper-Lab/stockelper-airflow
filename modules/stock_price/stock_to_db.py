@@ -83,14 +83,14 @@ def setup_database_table():
 def get_symbols_to_update() -> list[dict[str, str]]:
     """
     매일 실행 기준으로, "신규 상장 종목" + "기존 종목의 최신 주가"를 모두 수집하기 위한
-    (symbol, start_date) 작업 리스트를 반환합니다.
+    (symbol, data_start_date, data_end_date) 작업 리스트를 반환합니다.
 
     - 신규 종목(테이블에 심볼 없음): (listing date 또는 DEFAULT_START_DATE)부터 적재
     - 기존 종목: 해당 종목의 마지막 date 이후부터(today까지) 증분 적재
 
     반환 형식(동적 매핑용):
     [
-      {"symbol": "035420", "start_date": "2025-12-31"},
+      {"symbol": "035420", "data_start_date": "2025-12-31", "data_end_date": "2026-01-02"},
       ...
     ]
     """
@@ -158,7 +158,7 @@ def get_symbols_to_update() -> list[dict[str, str]]:
             # 형식이 이상하면 기본값으로
             start = DEFAULT_START_DATE
 
-        tasks.append({"symbol": sym, "start_date": start, "end_date": end_date})
+        tasks.append({"symbol": sym, "data_start_date": start, "data_end_date": end_date})
 
     log.info("Prepared %s update tasks (lookback_days=%s).", len(tasks), lookback_days)
 
