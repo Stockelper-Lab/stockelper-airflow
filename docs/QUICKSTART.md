@@ -72,6 +72,7 @@ AIRFLOW_ADMIN_EMAIL=admin@stockelper.com
    - `stock_report_crawler`
    - `competitor_crawler`
    - `log_cleanup`
+   - `dart_disclosure_collection_curated_major_reports`
 
 ### 2. 수동 실행
 
@@ -101,6 +102,21 @@ AIRFLOW_ADMIN_EMAIL=admin@stockelper.com
 - **ID**: `log_cleanup`
 - **스케줄**: 매일 02:00 UTC
 - **목적**: 오래된 로그 파일 정리
+
+### 4. DART 공시(엄선된) 수집
+- **ID**: `dart_disclosure_collection_curated_major_reports`
+- **스케줄**: 매일 08:00 KST
+- **목적**: OpenDART major-report 엔드포인트 중 엄선된 공시 유형 수집 → Postgres 적재
+
+### 5. DART 공시(엄선된) 백필
+- **ID**: `dart_disclosure_collection_curated_major_reports_backfill`
+- **스케줄**: 매일 1회 (`@daily`)
+- **목적**: 장기 기간(기본 20년) 범위 백필(청크 단위)
+
+### 6. DART 이벤트/감성 추출 백필
+- **ID**: `dart_event_extraction_universe_backfill`
+- **스케줄**: 수동 (schedule=None)
+- **목적**: 백필된 `dart_*` 테이블 기반으로 유니버스 종목 이벤트/감성 추출 재처리
 
 ## 🛠️ 기본 명령어
 

@@ -3,13 +3,13 @@ DART Major Reports -> Event/Sentiment Extraction (Universe Backfill) DAG
 ======================================================================
 
 Purpose:
-- After DART 36-type major reports have been collected into the SAME Postgres DB as `daily_stock_price`,
+- After curated(엄선된) DART major reports have been collected into the SAME Postgres DB as `daily_stock_price`,
   this DAG extracts event_type + sentiment_score (LLM) for UNIVERSE stocks only.
 - Output is stored into the same Postgres DB table: `dart_event_extractions`.
 
 Notes:
 - This DAG is MANUAL (schedule=None). It is intended to be run after the 20-year major-report backfill.
-- For daily incremental extraction, see `dart_disclosure_collection_36_types` DAG.
+- For daily incremental extraction, see `dart_disclosure_collection_curated_major_reports` DAG.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def load_universe_template(**context):
     from pathlib import Path
 
     default_path = "/opt/airflow/stockelper-kg/modules/dart_disclosure/universe.ai-sector.template.json"
-    universe_path = get_setting("DART36_UNIVERSE_JSON", default_path)
+    universe_path = get_setting("DART_CURATED_UNIVERSE_JSON", default_path)
 
     path = Path(str(universe_path)).expanduser()
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -163,7 +163,10 @@ def extract_events_backfill(**context):
         return True
 
     api_key = get_required_setting("OPEN_DART_API_KEY")
-    dart = OpenDartApiClient(api_key=api_key, sleep_seconds=float(get_setting("DART36_SLEEP_SECONDS", "0.2")))
+    dart = OpenDartApiClient(
+        api_key=api_key,
+        sleep_seconds=float(get_setting("DART_CURATED_SLEEP_SECONDS", "0.2") or "0.2"),
+    )
     extractor = OpenAIEventExtractor(timeout_seconds=float(get_setting("DART_EVENT_TIMEOUT_SECONDS", "60")))
 
     inserted = 0

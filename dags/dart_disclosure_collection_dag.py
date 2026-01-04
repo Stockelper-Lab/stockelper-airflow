@@ -1,11 +1,22 @@
 """
-DART 36 Major Report Type Collection DAG
-======================================
+DART Major Report Type Collection DAG (Curated endpoints)
+========================================================
 
 Updated Strategy (2026-01-03):
-- Collect 36 structured "major report" endpoints per company (no generic list/document parsing).
+- Collect curated(엄선된/선별된) structured "major report" endpoints per company (no generic list/document parsing).
 - Store to the SAME PostgreSQL as `daily_stock_price` (Airflow Connection: postgres_default).
 - Run daily at 08:00 KST.
+
+Airflow Variables:
+- OPEN_DART_API_KEY: "<your key>"
+- OPEN_DART_API_KEYS (optional): "key1,key2,..." (comma/whitespace separated). If set, rotates keys on 020.
+- DART_CURATED_MAJOR_REPORT_ENDPOINTS (optional): JSON list or comma-separated endpoints to collect.
+  If unset, defaults to the curated set defined in this DAG.
+- DART_CURATED_UNIVERSE_JSON (optional): path to universe JSON
+- DART_CURATED_LOOKBACK_DAYS (optional): lookback days for daily run
+- DART_CURATED_SLEEP_SECONDS (optional): sleep seconds between OpenDART calls (default: 0.2)
+- DART_CURATED_TIMEOUT_SECONDS (optional): OpenDART request timeout seconds (default: 30)
+- DART_CURATED_MAX_RETRIES (optional): max retries per endpoint (default: 3)
 """
 
 from __future__ import annotations
@@ -14,7 +25,7 @@ import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
-from modules.common.airflow_settings import get_required_setting, get_setting
+from modules.common.airflow_settings import get_required_setting, get_setting, get_setting_json
 from modules.common.logging_config import setup_logger
 
 logger = setup_logger(__name__)
@@ -30,6 +41,32 @@ default_args = {
     "execution_timeout": pendulum.duration(hours=2),
 }
 
+# 수집 대상 Major Report 엔드포인트 (엄선된/선별된 세트)
+#
+# 참고: 실제 엔드포인트 문자열은 OpenDART major report endpoint 이름입니다.
+DEFAULT_MAJOR_REPORT_ENDPOINTS: list[str] = [
+    "piicDecsn",  # 유상증자 결정
+    "fricDecsn",  # 무상증자 결정
+    "pifricDecsn",  # 유무상증자 결정
+    "crDecsn",  # 감자 결정
+    "cvbdIsDecsn",  # 전환사채권 발행결정
+    "bdwtIsDecsn",  # 신주인수권부사채권 발행결정
+    "tsstkAqDecsn",  # 자기주식 취득 결정
+    "tsstkDpDecsn",  # 자기주식 처분 결정
+    "tsstkAqTrctrCnsDecsn",  # 자기주식취득 신탁계약 체결 결정
+    "tsstkAqTrctrCcDecsn",  # 자기주식취득 신탁계약 해지 결정
+    "bsnInhDecsn",  # 영업양수 결정
+    "bsnTrfDecsn",  # 영업양도 결정
+    "tgastInhDecsn",  # 유형자산 양수 결정
+    "tgastTrfDecsn",  # 유형자산 양도 결정
+    "otcprStkInvscrInhDecsn",  # 타법인 주식 및 출자증권 양수결정
+    "otcprStkInvscrTrfDecsn",  # 타법인 주식 및 출자증권 양도결정
+    "cmpMgDecsn",  # 회사합병 결정
+    "cmpDvDecsn",  # 회사분할 결정
+    "cmpDvmgDecsn",  # 회사분할합병 결정
+    "stkExtrDecsn",  # 주식교환·이전 결정
+]
+
 
 def load_universe_template(**context):
     """Load AI-sector universe template JSON (used for event/sentiment extraction only)."""
@@ -37,7 +74,7 @@ def load_universe_template(**context):
     from pathlib import Path
 
     default_path = "/opt/airflow/stockelper-kg/modules/dart_disclosure/universe.ai-sector.template.json"
-    universe_path = get_setting("DART36_UNIVERSE_JSON", default_path)
+    universe_path = get_setting("DART_CURATED_UNIVERSE_JSON", default_path)
 
     path = Path(str(universe_path)).expanduser()
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -60,27 +97,40 @@ def load_universe_template(**context):
     return len(corp_codes)
 
 
-def collect_36_major_reports(**context):
-    """Collect 36 major report types for ALL listed companies and store to Postgres(postgres_default)."""
+def collect_curated_major_reports(**context):
+    """Collect curated(엄선된) major report endpoints for ALL listed companies and store to Postgres(postgres_default)."""
+    import re
     from stockelper_kg.collectors.dart_major_reports import DartMajorReportCollector
     from modules.postgres.postgres_connector import get_postgres_engine
 
-    api_key = get_required_setting("OPEN_DART_API_KEY")
     engine = get_postgres_engine(conn_id="postgres_default")
+    api_keys_raw = get_setting("OPEN_DART_API_KEYS")
+    api_keys = [k for k in re.split(r"[,\s]+", str(api_keys_raw or "").strip()) if k]
+    if not api_keys:
+        api_keys = [get_required_setting("OPEN_DART_API_KEY")]
 
-    lookback_days = int(get_setting("DART36_LOOKBACK_DAYS", "30"))
+    lookback_days = int(get_setting("DART_CURATED_LOOKBACK_DAYS", "30") or "30")
     # Daily runs should use "today" in Asia/Seoul as the window end date.
     end_date = pendulum.now("Asia/Seoul").format("YYYYMMDD")
 
+    report_types = get_setting_json("DART_CURATED_MAJOR_REPORT_ENDPOINTS", default=None)
+    if not report_types:
+        report_types = get_setting_json("DART_MAJOR_REPORT_ENDPOINTS", default=DEFAULT_MAJOR_REPORT_ENDPOINTS)
+
     collector = DartMajorReportCollector(
-        api_key=api_key,
+        api_keys=api_keys,
         engine=engine,
-        sleep_seconds=float(get_setting("DART36_SLEEP_SECONDS", "0.2")),
-        timeout_seconds=float(get_setting("DART36_TIMEOUT_SECONDS", "30")),
-        max_retries=int(get_setting("DART36_MAX_RETRIES", "3")),
+        sleep_seconds=float(get_setting("DART_CURATED_SLEEP_SECONDS", "0.2") or "0.2"),
+        timeout_seconds=float(get_setting("DART_CURATED_TIMEOUT_SECONDS", "30") or "30"),
+        max_retries=int(get_setting("DART_CURATED_MAX_RETRIES", "3") or "3"),
+        report_types=report_types,
     )
 
-    logger.info("Starting DART 36-type collection for ALL listed companies (lookback_days=%s)", lookback_days)
+    logger.info(
+        "Starting DART major-report collection (types=%s, lookback_days=%s)",
+        len(report_types) if isinstance(report_types, list) else "custom",
+        lookback_days,
+    )
     result = collector.collect_all_listed(
         lookback_days=lookback_days,
         end_date=str(end_date),
@@ -194,7 +244,10 @@ def extract_events(**context):
         return True
 
     api_key = get_required_setting("OPEN_DART_API_KEY")
-    dart = OpenDartApiClient(api_key=api_key, sleep_seconds=float(get_setting("DART36_SLEEP_SECONDS", "0.2")))
+    dart = OpenDartApiClient(
+        api_key=api_key,
+        sleep_seconds=float(get_setting("DART_CURATED_SLEEP_SECONDS", "0.2") or "0.2"),
+    )
     extractor = OpenAIEventExtractor(timeout_seconds=float(get_setting("DART_EVENT_TIMEOUT_SECONDS", "60")))
 
     inserted = 0
@@ -305,21 +358,21 @@ def pattern_matching(**context):
 
 
 with DAG(
-    dag_id="dart_disclosure_collection_36_types",
+    dag_id="dart_disclosure_collection_curated_major_reports",
     default_args=default_args,
-    description="Collect DART 36 major report types for ALL listed companies (Postgres=postgres_default)",
+    description="Collect curated(엄선된) DART major-report endpoints for ALL listed companies (Postgres=postgres_default)",
     schedule="0 8 * * *",  # 08:00 KST
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
-    tags=["dart", "disclosure", "postgres", "36-types"],
+    tags=["dart", "disclosure", "postgres", "curated-major-reports"],
 ) as dag:
     t_universe = PythonOperator(
         task_id="load_universe_template",
         python_callable=load_universe_template,
     )
     t_collect = PythonOperator(
-        task_id="collect_36_major_reports",
-        python_callable=collect_36_major_reports,
+        task_id="collect_curated_major_reports",
+        python_callable=collect_curated_major_reports,
     )
     t_extract = PythonOperator(
         task_id="extract_events",

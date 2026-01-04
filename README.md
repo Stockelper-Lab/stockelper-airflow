@@ -64,6 +64,32 @@ stockelper-airflow/
 **보관 기간**: 7일  
 **효과**: 디스크 공간 관리 및 성능 최적화
 
+### 4. DART 공시(엄선된) 수집 (`dart_disclosure_collection_dag.py`)
+
+**ID**: `dart_disclosure_collection_curated_major_reports`  
+**스케줄**: 매일 08:00 KST  
+**목적**: OpenDART major-report 엔드포인트 중 **엄선된 공시 유형만** 전 종목 대상으로 수집하여 Postgres에 적재
+
+**태스크**:
+- `load_universe_template`: (이벤트 추출용) 유니버스 로드
+- `collect_curated_major_reports`: 엄선된 공시 엔드포인트 수집
+- `extract_events`: (유니버스 대상) LLM 이벤트/감성 추출
+- `pattern_matching`: (placeholder) 후처리
+
+**출력**: `postgres_default` DB의 `dart_*` 테이블들 + `dart_event_extractions`
+
+### 5. DART 공시(엄선된) 백필 (`dart_disclosure_collection_backfill_dag.py`)
+
+**ID**: `dart_disclosure_collection_curated_major_reports_backfill`  
+**스케줄**: 매일 1회 (`@daily`)  
+**목적**: 장기 기간(기본 20년) 범위에서 엄선된 공시 엔드포인트를 청크 단위로 백필
+
+### 6. DART 이벤트/감성 추출 백필 (`dart_event_extraction_backfill_dag.py`)
+
+**ID**: `dart_event_extraction_universe_backfill`  
+**스케줄**: 수동 (schedule=None)  
+**목적**: 백필된 `dart_*` 테이블을 기반으로 유니버스 종목에 대해 이벤트/감성 추출을 재처리
+
 ## 🔧 모듈
 
 ### 공통 모듈
