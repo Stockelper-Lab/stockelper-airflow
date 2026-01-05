@@ -18,6 +18,9 @@ Airflow Variables:
 - DART_CURATED_BACKFILL_END_DATE (optional): "YYYYMMDD" (default: today in Asia/Seoul)
 - DART_CURATED_BACKFILL_CHUNK_SIZE (optional): "500" (default: 500)
 - DART_CURATED_UNIVERSE_JSON (optional): path to priority universe JSON (processed first)
+- DART_CURATED_BACKFILL_MAX_CHUNKS_PER_RUN (optional): "0" (default: 0 = 무제한)
+  - 1이면 기존처럼 1회 실행당 500개(청크 1개)만 처리
+  - 0이면 가능한 한 많이(여러 청크) 처리하다가 (a) 전 종목 완료 또는 (b) API 020 소진 시 중단
 - DART_CURATED_MAJOR_REPORT_ENDPOINTS (optional): JSON list or comma-separated endpoints to collect.
   If unset, defaults to the curated set defined in this DAG.
 - DART_CURATED_SLEEP_SECONDS (optional): sleep seconds between OpenDART calls (default: 0.2)
@@ -143,6 +146,7 @@ def collect_curated_major_reports_backfill(**context):
     start_s = start_dt.format("YYYYMMDD")
 
     chunk_size = int(get_setting("DART_CURATED_BACKFILL_CHUNK_SIZE", "500") or "500")
+    max_chunks_per_run = int(get_setting("DART_CURATED_BACKFILL_MAX_CHUNKS_PER_RUN", "0") or "0")
     # Priority universe: start with this file first, then continue with other listed companies.
     priority_universe_path = get_setting(
         "DART_CURATED_UNIVERSE_JSON",
@@ -163,23 +167,56 @@ def collect_curated_major_reports_backfill(**context):
     )
 
     logger.info(
-        "Starting DART major-report BACKFILL CHUNK (types=%s, chunk_size=%s, priority_universe=%s, range=%s..%s, years=%s)",
+        "Starting DART major-report BACKFILL (types=%s, chunk_size=%s, max_chunks_per_run=%s, priority_universe=%s, range=%s..%s, years=%s)",
         len(report_types) if isinstance(report_types, list) else "custom",
         chunk_size,
+        max_chunks_per_run,
         priority_universe_path,
         start_s,
         end_s,
         years,
     )
 
-    result = collector.collect_backfill_chunk(
-        start_date=start_s,
-        end_date=end_s,
-        chunk_size=chunk_size,
-        priority_universe_path=str(priority_universe_path) if priority_universe_path else None,
-    )
+    # 멀티-청크 모드:
+    # - chunk_size(기본 500) 단위로 계속 처리
+    # - max_chunks_per_run=0이면 가능한 만큼(020 소진 또는 전 종목 완료까지)
+    total_processed = 0
+    total_inserted = 0
+    chunks_ran = 0
+    stopped_reason: str | None = None
 
-    total_inserted = int(result.get("inserted_total") or 0) if isinstance(result, dict) else 0
+    while True:
+        chunks_ran += 1
+
+        result = collector.collect_backfill_chunk(
+            start_date=start_s,
+            end_date=end_s,
+            chunk_size=chunk_size,
+            priority_universe_path=str(priority_universe_path) if priority_universe_path else None,
+        )
+
+        if isinstance(result, dict):
+            total_processed += int(result.get("processed_count") or 0)
+            total_inserted += int(result.get("inserted_total") or 0)
+            stopped_reason = result.get("stopped_reason")  # may be None
+
+            # Stop conditions
+            if stopped_reason:
+                break
+            # If we processed fewer than chunk_size, there are no more incomplete companies.
+            if int(result.get("processed_count") or 0) < int(chunk_size):
+                break
+        else:
+            # Unexpected shape: stop to avoid infinite loop
+            stopped_reason = "invalid_result"
+            break
+
+        if max_chunks_per_run > 0 and chunks_ran >= max_chunks_per_run:
+            stopped_reason = "max_chunks_reached"
+            break
+
+    # keep backward compatible fields for dashboards / existing tooling
+    total_inserted_best_effort = int(total_inserted or 0)
 
     context["ti"].xcom_push(
         key="backfill_summary",
@@ -188,10 +225,11 @@ def collect_curated_major_reports_backfill(**context):
             "end_date": end_s,
             "years": years,
             "chunk_size": chunk_size,
+            "chunks_ran": chunks_ran,
             "priority_universe_path": str(priority_universe_path),
-            "processed_count": int(result.get("processed_count") or 0) if isinstance(result, dict) else None,
-            "stopped_reason": result.get("stopped_reason") if isinstance(result, dict) else None,
-            "total_inserted_best_effort": total_inserted,
+            "processed_count": int(total_processed),
+            "stopped_reason": stopped_reason,
+            "total_inserted_best_effort": total_inserted_best_effort,
         },
     )
     return True
