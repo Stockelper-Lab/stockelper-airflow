@@ -145,18 +145,41 @@ def extract_events_backfill(**context):
             return "CRISIS_EVENT"
         return "OTHER"
 
+    # Find major-report tables (dart_*) but skip non-report tables (e.g., progress tables) by requiring expected columns.
     with engine.begin() as conn:
         tbl_rows = conn.execute(
             text(
                 """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='public' AND table_name LIKE 'dart_%'
-                ORDER BY table_name
+                SELECT t.table_name
+                FROM information_schema.tables t
+                WHERE t.table_schema='public'
+                  AND t.table_name LIKE 'dart_%'
+                  AND t.table_name <> 'dart_event_extractions'
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_no'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_dt'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='report_type'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='category'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='stock_code'
+                  )
+                ORDER BY t.table_name
                 """
             )
         ).fetchall()
-    table_names = [r[0] for r in tbl_rows if r and r[0] != "dart_event_extractions"]
+    table_names = [r[0] for r in tbl_rows]
 
     if not table_names:
         logger.warning("No dart_* tables found; did you run the major-report backfill first?")

@@ -17,6 +17,13 @@ Airflow Variables:
 - DART_CURATED_SLEEP_SECONDS (optional): sleep seconds between OpenDART calls (default: 0.2)
 - DART_CURATED_TIMEOUT_SECONDS (optional): OpenDART request timeout seconds (default: 30)
 - DART_CURATED_MAX_RETRIES (optional): max retries per endpoint (default: 3)
+
+# Daily (curated) collection cursor:
+# - DART_CURATED_DAILY_LOCKED_END_DATE (optional): YYYYMMDD. If unset, auto-initialized to yesterday (Asia/Seoul).
+# - DART_CURATED_DAILY_END_DATE (optional): YYYYMMDD. If set, always collect this date range (no auto-advance).
+# - DART_CURATED_DAILY_WINDOW_DAYS (optional): number of days per collection window (default: 1)
+# - DART_CURATED_DAILY_CHUNK_SIZE (optional): companies per chunk (default: 500)
+# - DART_CURATED_DAILY_MAX_CHUNKS_PER_RUN (optional): 0=무제한(기본), N=최대 N청크만 수행
 """
 
 from __future__ import annotations
@@ -99,6 +106,9 @@ def load_universe_template(**context):
 
 def collect_curated_major_reports(**context):
     """Collect curated(엄선된) major report endpoints for ALL listed companies and store to Postgres(postgres_default)."""
+    from datetime import datetime
+
+    from airflow.models import Variable
     import re
     from stockelper_kg.collectors.dart_major_reports import DartMajorReportCollector
     from modules.postgres.postgres_connector import get_postgres_engine
@@ -109,9 +119,42 @@ def collect_curated_major_reports(**context):
     if not api_keys:
         api_keys = [get_required_setting("OPEN_DART_API_KEY")]
 
-    lookback_days = int(get_setting("DART_CURATED_LOOKBACK_DAYS", "30") or "30")
-    # Daily runs should use "today" in Asia/Seoul as the window end date.
-    end_date = pendulum.now("Asia/Seoul").format("YYYYMMDD")
+    # Daily cursor window (default: yesterday only)
+    daily_window_days = int(get_setting("DART_CURATED_DAILY_WINDOW_DAYS", "1") or "1")
+    if daily_window_days <= 0:
+        raise ValueError(f"Invalid DART_CURATED_DAILY_WINDOW_DAYS: {daily_window_days!r}")
+
+    configured_end = get_setting("DART_CURATED_DAILY_END_DATE")
+    locked_key = "DART_CURATED_DAILY_LOCKED_END_DATE"
+
+    cap_s = pendulum.now("Asia/Seoul").subtract(days=1).format("YYYYMMDD")
+
+    if configured_end:
+        end_s = str(configured_end)
+        should_advance_cursor = False
+    else:
+        should_advance_cursor = True
+        try:
+            end_s = str(Variable.get(locked_key))
+        except Exception:  # noqa: BLE001
+            end_s = cap_s
+            Variable.set(locked_key, end_s)
+
+    end_s = end_s.replace("-", "")
+    if len(end_s) != 8 or not end_s.isdigit():
+        raise ValueError(f"Invalid daily end date: {end_s!r} (expected YYYYMMDD)")
+
+    # Do not process future dates; clamp to yesterday (Asia/Seoul).
+    if end_s > cap_s:
+        end_s = cap_s
+
+    end_dt = datetime.strptime(end_s, "%Y%m%d")
+    start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(days=daily_window_days - 1)
+    start_s = start_dt.format("YYYYMMDD")
+
+    # Chunking (same style as backfill)
+    chunk_size = int(get_setting("DART_CURATED_DAILY_CHUNK_SIZE", "500") or "500")
+    max_chunks_per_run = int(get_setting("DART_CURATED_DAILY_MAX_CHUNKS_PER_RUN", "0") or "0")
 
     report_types = get_setting_json("DART_CURATED_MAJOR_REPORT_ENDPOINTS", default=None)
     if not report_types:
@@ -126,16 +169,72 @@ def collect_curated_major_reports(**context):
         report_types=report_types,
     )
 
+    priority_universe_path = get_setting(
+        "DART_CURATED_UNIVERSE_JSON",
+        "/opt/airflow/modules/dart_disclosure/universe.ai-sector.template.json",
+    )
+
     logger.info(
-        "Starting DART major-report collection (types=%s, lookback_days=%s)",
+        "Starting DART curated DAILY collection (types=%s, range=%s..%s, window_days=%s, chunk_size=%s, max_chunks_per_run=%s)",
         len(report_types) if isinstance(report_types, list) else "custom",
-        lookback_days,
+        start_s,
+        end_s,
+        daily_window_days,
+        chunk_size,
+        max_chunks_per_run,
     )
-    result = collector.collect_all_listed(
-        lookback_days=lookback_days,
-        end_date=str(end_date),
-    )
-    context["ti"].xcom_push(key="collect_result", value=result)
+
+    total_processed = 0
+    total_inserted = 0
+    chunks_ran = 0
+    stopped_reason: str | None = None
+    last_processed_count = 0
+
+    while True:
+        chunks_ran += 1
+        result = collector.collect_backfill_chunk(
+            start_date=start_s,
+            end_date=end_s,
+            chunk_size=chunk_size,
+            priority_universe_path=str(priority_universe_path) if priority_universe_path else None,
+        )
+
+        if not isinstance(result, dict):
+            stopped_reason = "invalid_result"
+            break
+
+        last_processed_count = int(result.get("processed_count") or 0)
+        total_processed += last_processed_count
+        total_inserted += int(result.get("inserted_total") or 0)
+        stopped_reason = result.get("stopped_reason")
+
+        if stopped_reason:
+            break
+        if last_processed_count < int(chunk_size):
+            # No more incomplete companies for this range
+            break
+        if max_chunks_per_run > 0 and chunks_ran >= max_chunks_per_run:
+            stopped_reason = "max_chunks_reached"
+            break
+
+    # Cursor advance when fully completed for the date range
+    if should_advance_cursor and stopped_reason is None and last_processed_count < int(chunk_size):
+        # Advance cursor by 1 day; next run will clamp to yesterday if it is in the future.
+        next_dt = pendulum.instance(end_dt, tz="Asia/Seoul").add(days=1)
+        Variable.set(locked_key, next_dt.format("YYYYMMDD"))
+
+    result_summary = {
+        "start_date": start_s,
+        "end_date": end_s,
+        "window_days": daily_window_days,
+        "chunk_size": int(chunk_size),
+        "chunks_ran": int(chunks_ran),
+        "processed_count": int(total_processed),
+        "stopped_reason": stopped_reason,
+        "inserted_total": int(total_inserted),
+    }
+    # Keep XCom small: store only summary (avoid per_company payload explosion).
+    context["ti"].xcom_push(key="collect_result", value=result_summary)
     return True
 
 
@@ -225,15 +324,38 @@ def extract_events(**context):
             return "CRISIS_EVENT"
         return "OTHER"
 
-    # Find all major-report tables (dart_*) and pick universe rows in window, excluding already extracted.
+    # Find major-report tables (dart_*) and pick universe rows in window, excluding already extracted.
+    # NOTE: Skip non-report tables (e.g., progress tables) by requiring expected columns.
     with engine.begin() as conn:
         tbl_rows = conn.execute(
             text(
                 """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema='public' AND table_name LIKE 'dart_%'
-                ORDER BY table_name
+                SELECT t.table_name
+                FROM information_schema.tables t
+                WHERE t.table_schema='public'
+                  AND t.table_name LIKE 'dart_%'
+                  AND t.table_name <> 'dart_event_extractions'
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_no'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_dt'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='report_type'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='category'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='stock_code'
+                  )
+                ORDER BY t.table_name
                 """
             )
         ).fetchall()
@@ -254,10 +376,6 @@ def extract_events(**context):
     skipped = 0
 
     for table_name in table_names:
-        # Skip our output table
-        if table_name == "dart_event_extractions":
-            continue
-
         q = text(
             f"""
             SELECT t.rcept_no, t.stock_code, t.corp_code, t.corp_name, t.rcept_dt, t.report_type, t.category
@@ -373,6 +491,8 @@ with DAG(
     t_collect = PythonOperator(
         task_id="collect_curated_major_reports",
         python_callable=collect_curated_major_reports,
+        # Daily collection may iterate multiple 500-sized chunks; allow long runs.
+        execution_timeout=pendulum.duration(hours=24),
     )
     t_extract = PythonOperator(
         task_id="extract_events",
