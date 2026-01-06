@@ -1,15 +1,17 @@
 """
-DART Major Reports -> Event/Sentiment Extraction (Universe Backfill) DAG
-======================================================================
+DART Disclosures -> Event/Sentiment Extraction -> Neo4j Backfill DAG
+===================================================================
 
 Purpose:
-- After curated(엄선된) DART major reports have been collected into the SAME Postgres DB as `daily_stock_price`,
-  this DAG extracts event_type + sentiment_score (LLM) for UNIVERSE stocks only.
-- Output is stored into the same Postgres DB table: `dart_event_extractions`.
+- After curated(엄선된) DART disclosure tables(dart_*) have been collected into Postgres,
+  this DAG:
+  1) extracts event_type + sentiment_score (LLM) from Postgres disclosure tables
+  2) stores results into Postgres table: `dart_event_extractions`
+  3) upserts the extracted events into Neo4j (ontology-aligned)
 
 Notes:
-- This DAG is MANUAL (schedule=None). It is intended to be run after the 20-year major-report backfill.
-- For daily incremental extraction, see `dart_disclosure_collection_curated_major_reports` DAG.
+- This DAG is MANUAL (schedule=None). Intended for backfill/repair runs.
+- Ontology reference: `stockelper-kg/src/stockelper_kg/graph/ontology.py`
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from sqlalchemy import text
 from modules.common.airflow_settings import get_required_setting, get_setting
 from modules.common.logging_config import setup_logger
 from modules.postgres.postgres_connector import get_postgres_engine
+from modules.neo4j.dart_event_uploader import load_dart_event_extractions_to_neo4j
 
 logger = setup_logger(__name__)
 
@@ -42,7 +45,9 @@ default_args = {
 
 
 def load_universe_template(**context):
-    """Load AI-sector universe template JSON and push stock_codes to XCom."""
+    """(Deprecated) kept for backward compatibility. No-op."""
+    logger.info("load_universe_template is no longer used for Postgres-based backfill; skipping.")
+    return True
     import json
     from pathlib import Path
 
@@ -68,23 +73,11 @@ def load_universe_template(**context):
 
 
 def extract_events_backfill(**context):
-    """Backfill extraction for universe stocks into Postgres dart_event_extractions."""
+    """Backfill extraction for ALL disclosure rows in Postgres into `dart_event_extractions`."""
     from modules.dart_disclosure.llm_extractor import OpenAIEventExtractor
-    from modules.dart_disclosure.opendart_api import (
-        OpenDartApiClient,
-        build_dart_viewer_url,
-        document_xml_to_text,
-        normalize_iso_date,
-    )
+    from modules.dart_disclosure.opendart_api import build_dart_viewer_url, normalize_iso_date
 
     ti = context["ti"]
-    stock_codes: list[str] = ti.xcom_pull(key="stock_codes", task_ids="load_universe_template") or []
-    stock_codes = [str(c).strip().zfill(6) for c in stock_codes if str(c).strip()]
-    stock_codes = [c for c in stock_codes if c.isdigit() and len(c) == 6]
-
-    if not stock_codes:
-        logger.warning("No universe stock_codes loaded; skipping.")
-        return True
 
     years = int(get_setting("DART_EVENT_BACKFILL_YEARS", "20"))
     end_s = str(get_setting("DART_EVENT_BACKFILL_END_DATE", pendulum.now("Asia/Seoul").format("YYYYMMDD")) or "")
@@ -185,23 +178,18 @@ def extract_events_backfill(**context):
         logger.warning("No dart_* tables found; did you run the major-report backfill first?")
         return True
 
-    api_key = get_required_setting("OPEN_DART_API_KEY")
-    dart = OpenDartApiClient(
-        api_key=api_key,
-        sleep_seconds=float(get_setting("DART_CURATED_SLEEP_SECONDS", "0.2") or "0.2"),
-    )
     extractor = OpenAIEventExtractor(timeout_seconds=float(get_setting("DART_EVENT_TIMEOUT_SECONDS", "60")))
 
     inserted = 0
     skipped = 0
+    hard_limit = int(get_setting("DART_EVENT_BACKFILL_LIMIT", "0") or "0")
 
     for table_name in table_names:
         q = text(
             f"""
-            SELECT t.rcept_no, t.stock_code, t.corp_code, t.corp_name, t.rcept_dt, t.report_type, t.category
+            SELECT t.rcept_no, t.stock_code, t.corp_code, t.corp_name, t.rcept_dt, t.report_type, t.category, t.payload
             FROM {table_name} t
-            WHERE t.stock_code = ANY(:stock_codes)
-              AND t.rcept_dt >= :start_dt
+            WHERE t.rcept_dt >= :start_dt
               AND t.rcept_dt <= :end_dt
               AND NOT EXISTS (SELECT 1 FROM dart_event_extractions e WHERE e.rcept_no = t.rcept_no)
             ORDER BY t.rcept_dt ASC
@@ -211,7 +199,7 @@ def extract_events_backfill(**context):
         with engine.begin() as conn:
             rows = conn.execute(
                 q,
-                {"stock_codes": stock_codes, "start_dt": start_dt.date(), "end_dt": end_dt.date()},
+                {"start_dt": start_dt.date(), "end_dt": end_dt.date()},
             ).fetchall()
 
         for r in rows:
@@ -222,6 +210,7 @@ def extract_events_backfill(**context):
             rcept_dt = r[4]
             report_type = str(r[5] or "").strip() or None
             category = str(r[6] or "").strip() or None
+            payload = r[7]
 
             hint = _event_type_hint(report_type, category)
             url = build_dart_viewer_url(rcept_no)
@@ -229,8 +218,9 @@ def extract_events_backfill(**context):
             reported_iso = normalize_iso_date(rcept_dt_str) if rcept_dt_str else pendulum.now("Asia/Seoul").format("YYYY-MM-DD")
 
             try:
-                doc_xml = dart.fetch_document_xml(rcept_no=rcept_no)
-                body_text = document_xml_to_text(doc_xml)
+                # IMPORTANT: Use payload from Postgres disclosure tables as the primary input (no extra OpenDART calls).
+                # This avoids 020 rate limits and keeps extraction reproducible from DB state.
+                body_text = _json.dumps(payload or {}, ensure_ascii=False, indent=2)
                 extracted = extractor.extract(
                     corp_name=corp_name or stock_code,
                     stock_code=stock_code,
@@ -282,13 +272,19 @@ def extract_events_backfill(**context):
                 )
             inserted += 1
 
+            if hard_limit > 0 and inserted >= hard_limit:
+                logger.warning("Reached DART_EVENT_BACKFILL_LIMIT=%s; stopping early.", hard_limit)
+                break
+
+        if hard_limit > 0 and inserted >= hard_limit:
+            break
+
     logger.info(
-        "extract_events_backfill done: inserted=%s skipped=%s range=%s..%s universe=%s",
+        "extract_events_backfill done: inserted=%s skipped=%s range=%s..%s",
         inserted,
         skipped,
         start_dt.format("YYYY-MM-DD"),
         end_dt.strftime("%Y-%m-%d"),
-        len(stock_codes),
     )
 
     ti.xcom_push(
@@ -299,7 +295,7 @@ def extract_events_backfill(**context):
             "years": years,
             "inserted": inserted,
             "skipped": skipped,
-            "universe_size": len(stock_codes),
+            "limit": hard_limit,
         },
     )
     return True
@@ -310,19 +306,51 @@ def report(**context):
     logger.info("Backfill summary: %s", summary)
 
 
+def load_to_neo4j_backfill(**context):
+    """Upsert extracted events from Postgres into Neo4j (ontology-aligned)."""
+    years = int(get_setting("DART_EVENT_BACKFILL_YEARS", "20"))
+    end_s = str(get_setting("DART_EVENT_BACKFILL_END_DATE", pendulum.now("Asia/Seoul").format("YYYYMMDD")) or "")
+    end_s = end_s.replace("-", "")
+    if len(end_s) != 8 or not end_s.isdigit():
+        raise ValueError(f"Invalid DART_EVENT_BACKFILL_END_DATE: {end_s!r}")
+
+    end_dt = datetime.strptime(end_s, "%Y%m%d")
+    start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(years=years)
+
+    limit = int(get_setting("DART_EVENT_NEO4J_LIMIT", "0") or "0")
+    res = load_dart_event_extractions_to_neo4j(
+        neo4j_conn_id=get_setting("NEO4J_CONN_ID", "neo4j_default") or "neo4j_default",
+        postgres_conn_id="postgres_default",
+        start_date=start_dt.format("YYYY-MM-DD"),
+        end_date=end_dt.strftime("%Y-%m-%d"),
+        limit=limit if limit > 0 else None,
+    )
+    context["ti"].xcom_push(key="neo4j_load_summary", value=res)
+    logger.info("Neo4j load summary: %s", res)
+    return True
+
+
 with DAG(
-    dag_id="dart_event_extraction_universe_backfill",
+    dag_id="dart_event_sentiment_neo4j_backfill",
     default_args=default_args,
-    description="(BACKFILL) Extract event_type/sentiment for universe stocks from dart_* tables into Postgres",
+    description="(BACKFILL) Extract event_type/sentiment from Postgres disclosures and upsert into Neo4j",
     schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
-    tags=["dart", "event", "sentiment", "postgres", "backfill"],
+    tags=["dart", "event", "sentiment", "postgres", "neo4j", "backfill"],
 ) as dag:
-    t_universe = PythonOperator(task_id="load_universe_template", python_callable=load_universe_template)
-    t_extract = PythonOperator(task_id="extract_events_backfill", python_callable=extract_events_backfill)
+    t_extract = PythonOperator(
+        task_id="extract_events_backfill",
+        python_callable=extract_events_backfill,
+        execution_timeout=pendulum.duration(hours=24),
+    )
+    t_load_neo4j = PythonOperator(
+        task_id="load_to_neo4j_backfill",
+        python_callable=load_to_neo4j_backfill,
+        execution_timeout=pendulum.duration(hours=24),
+    )
     t_report = PythonOperator(task_id="report", python_callable=report)
 
-    t_universe >> t_extract >> t_report
+    t_extract >> t_load_neo4j >> t_report
 
 
