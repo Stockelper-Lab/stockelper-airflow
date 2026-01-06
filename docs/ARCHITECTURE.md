@@ -29,7 +29,8 @@ stockelper-airflow/
 │   ├── competitor_crawler_dag.py   # 경쟁사 크롤러
 │   ├── dart_disclosure_collection_dag.py # DART 공시(엄선된) 수집
 │   ├── dart_disclosure_collection_backfill_dag.py # DART 공시(엄선된) 백필
-│   ├── dart_event_extraction_backfill_dag.py # DART 이벤트/감성 추출 백필
+│   ├── neo4j_kg_etl_dag.py          # (DAILY) Postgres → Neo4j KG 적재
+│   ├── neo4j_kg_rebuild_dag.py      # (MANUAL) Neo4j KG 전체 재구축
 │   └── log_cleanup_dag.py          # 로그 정리
 │
 ├── modules/                        # 재사용 가능한 모듈

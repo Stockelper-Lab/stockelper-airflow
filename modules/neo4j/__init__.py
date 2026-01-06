@@ -1,18 +1,13 @@
 """
-Neo4j operators module for Airflow
+Neo4j package for Airflow modules.
 
-This module provides operators for Neo4j Knowledge Graph ETL operations.
+IMPORTANT:
+- Keep this `__init__` lightweight to avoid **Broken DAG** issues during Airflow's import/parse phase.
+- Import concrete operators/functions directly from `modules.neo4j.neo4j_operators`.
 """
 
-from .neo4j_operators import (
-    create_base_kg_data,
-    extract_data_from_request,
-    load_daily_data,
-)
+# Intentionally do not import from `.neo4j_operators` here.
+# (Old exports like `extract_data_from_request`, `load_daily_data` were removed/renamed.)
 
-__all__ = [
-    "create_base_kg_data",
-    "extract_data_from_request",
-    "load_daily_data",
-]
+__all__: list[str] = []
 

@@ -107,10 +107,6 @@ def create_base_kg_data(*, neo4j_conn_id: str):
     """Idempotently create constraints/indexes required by the KG."""
     hook = Neo4jHook(neo4j_conn_id)
 
-    setup_check = "MATCH (m:Meta {name: 'kg_setup_status', complete: true}) RETURN m"
-    if hook.run(setup_check):
-        raise AirflowSkipException("KG setup is already complete.")
-
     statements: list[str] = []
     if _kg_generate_constraints is not None:
         constraints = _kg_generate_constraints().strip()
@@ -134,6 +130,7 @@ def create_base_kg_data(*, neo4j_conn_id: str):
         "MERGE (m:Meta {name: 'kg_setup_status'}) "
         "SET m.complete = true, m.completed_at = datetime()"
     )
+    return {"constraints_applied": len(statements)}
 
 
 def load_daily_stock_prices(
@@ -489,6 +486,182 @@ def rebuild_kg_from_postgres_range(
         "start_date": start_iso,
         "end_date": end_iso,
         "days": len(dates),
+        "loaded_stock_prices": total_prices,
+        "loaded_dart_events": total_events,
+    }
+
+
+def rebuild_kg_from_postgres_all(
+    *,
+    neo4j_conn_id: str,
+    postgres_conn_id: str = "postgres_default",
+    wipe: bool = True,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild the KG using **ALL data present in PostgreSQL** (optionally within a range).
+
+    If `start_date`/`end_date` are omitted, this will derive the range from DB contents.
+
+    Notes:
+    - 날짜 단위 KG이므로, `daily_stock_price.date` + `dart_*.rcept_dt`의 **합집합** 날짜를 대상으로 적재합니다.
+    - 특정 날짜에 주가/공시가 없으면 해당 부분만 스킵하고 계속 진행합니다.
+    """
+    engine = get_postgres_engine(conn_id=postgres_conn_id)
+
+    # Discover dart_* tables (same rule as daily loader)
+    with engine.begin() as conn:
+        tbl_rows = conn.execute(
+            text(
+                """
+                SELECT t.table_name
+                FROM information_schema.tables t
+                WHERE t.table_schema='public'
+                  AND t.table_name LIKE 'dart_%'
+                  AND t.table_name <> 'dart_event_extractions'
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_no'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_dt'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='report_type'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='category'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='stock_code'
+                  )
+                ORDER BY t.table_name
+                """
+            )
+        ).fetchall()
+    dart_tables = [r[0] for r in tbl_rows]
+
+    # Resolve date range from DB if not provided
+    start_iso = _to_iso_date(start_date) if start_date else None
+    end_iso = _to_iso_date(end_date) if end_date else None
+
+    if start_iso is None or end_iso is None:
+        with engine.begin() as conn:
+            sp_min = conn.execute(text("SELECT MIN(date) FROM daily_stock_price")).scalar()
+            sp_max = conn.execute(text("SELECT MAX(date) FROM daily_stock_price")).scalar()
+        sp_min_iso = _to_iso_date(sp_min)
+        sp_max_iso = _to_iso_date(sp_max)
+
+        dart_min_iso: str | None = None
+        dart_max_iso: str | None = None
+        if dart_tables:
+            for t in dart_tables:
+                with engine.begin() as conn:
+                    dmin = conn.execute(text(f"SELECT MIN(rcept_dt) FROM {t}")).scalar()
+                    dmax = conn.execute(text(f"SELECT MAX(rcept_dt) FROM {t}")).scalar()
+                dmin_iso = _to_iso_date(dmin)
+                dmax_iso = _to_iso_date(dmax)
+                if dmin_iso and (dart_min_iso is None or dmin_iso < dart_min_iso):
+                    dart_min_iso = dmin_iso
+                if dmax_iso and (dart_max_iso is None or dmax_iso > dart_max_iso):
+                    dart_max_iso = dmax_iso
+
+        candidates_min = [d for d in (start_iso, sp_min_iso, dart_min_iso) if d]
+        candidates_max = [d for d in (end_iso, sp_max_iso, dart_max_iso) if d]
+
+        if start_iso is None:
+            start_iso = min(candidates_min) if candidates_min else None
+        if end_iso is None:
+            end_iso = max(candidates_max) if candidates_max else None
+
+    if not start_iso or not end_iso:
+        raise AirflowSkipException("No usable dates found in Postgres (daily_stock_price and dart_*).")
+
+    # Wipe (optional)
+    if wipe:
+        wipe_neo4j_database(neo4j_conn_id=neo4j_conn_id)
+
+    # Setup constraints/meta marker after wipe
+    try:
+        create_base_kg_data(neo4j_conn_id=neo4j_conn_id)
+    except AirflowSkipException:
+        pass
+
+    # Collect distinct dates from BOTH sources within the range (union)
+    date_set: set[str] = set()
+    with engine.begin() as conn:
+        sp_dates = conn.execute(
+            text(
+                """
+                SELECT DISTINCT date
+                FROM daily_stock_price
+                WHERE date >= :start_dt AND date <= :end_dt
+                """
+            ),
+            {"start_dt": start_iso, "end_dt": end_iso},
+        ).fetchall()
+    for r in sp_dates:
+        d = _to_iso_date(r[0])
+        if d:
+            date_set.add(d)
+
+    for t in dart_tables:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT rcept_dt
+                    FROM {t}
+                    WHERE rcept_dt >= :start_dt AND rcept_dt <= :end_dt
+                    """
+                ),
+                {"start_dt": start_iso, "end_dt": end_iso},
+            ).fetchall()
+        for r in rows:
+            d = _to_iso_date(r[0])
+            if d:
+                date_set.add(d)
+
+    all_dates = sorted(date_set)
+    if not all_dates:
+        raise AirflowSkipException(f"No dates found in range {start_iso}..{end_iso}")
+
+    total_prices = 0
+    total_events = 0
+    skipped_prices_days = 0
+    skipped_event_days = 0
+
+    for d in all_dates:
+        try:
+            res_prices = load_daily_stock_prices(
+                neo4j_conn_id=neo4j_conn_id,
+                postgres_conn_id=postgres_conn_id,
+                target_date=d,
+            )
+            total_prices += int(res_prices.get("loaded_stock_prices") or 0)
+        except AirflowSkipException:
+            skipped_prices_days += 1
+
+        try:
+            res_events = load_daily_dart_disclosure_events(
+                neo4j_conn_id=neo4j_conn_id,
+                postgres_conn_id=postgres_conn_id,
+                target_date=d,
+            )
+            total_events += int(res_events.get("loaded_dart_events") or 0)
+        except AirflowSkipException:
+            skipped_event_days += 1
+
+    return {
+        "start_date": start_iso,
+        "end_date": end_iso,
+        "days": len(all_dates),
+        "skipped_price_days": skipped_prices_days,
+        "skipped_event_days": skipped_event_days,
         "loaded_stock_prices": total_prices,
         "loaded_dart_events": total_events,
     }

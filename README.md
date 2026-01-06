@@ -26,15 +26,12 @@ Apache Airflow 기반 데이터 수집 및 처리 파이프라인입니다.
 **4. dart_disclosure_collection_dag.py**
 - 스케줄: 매일 08:00 KST
 - 목적: DART 36개 주요 공시 유형 수집 → PostgreSQL
-- 태스크: 유니버스 로드 → 36개 보고서 수집 → 이벤트 추출 (LLM)
+- 태스크: 36개 보고서(엄선된 major-report 엔드포인트) 수집 → PostgreSQL 적재
+  - NOTE: LLM 기반 이벤트/감성 추출은 2025-01-06 이후 **POSTPONED**
 
 **5. dart_disclosure_collection_backfill_dag.py**
 - 스케줄: 수동
 - 목적: DART 과거 데이터 백필
-
-**6. dart_event_extraction_backfill_dag.py**
-- 스케줄: 수동
-- 목적: 유니버스 종목 이벤트/감정 추출 (20년 백필 이후)
 
 ### 유지보수 & 지식 그래프
 
@@ -44,9 +41,9 @@ Apache Airflow 기반 데이터 수집 및 처리 파이프라인입니다.
 - 태스크: 로그 통계 → 정리 → 정리 후 통계
 
 **8. neo4j_kg_etl_dag.py**
-- 스케줄: @daily
+- 스케줄: 매일 20:10 KST (주가 수집 이후)
 - 목적: Neo4j 지식 그래프 구축 및 업데이트
-- 태스크: 기본 데이터 생성 → 데이터 추출 → Neo4j 로드
+- 태스크: 제약조건/기본데이터 생성 → 대상일 결정 → 주가 적재 → 공시 이벤트 적재
 
 ## 📁 모듈 구조
 
@@ -62,7 +59,7 @@ Apache Airflow 기반 데이터 수집 및 처리 파이프라인입니다.
 ### DART (`modules/dart_disclosure/`)
 - `runner.py` - DART 수집 오케스트레이션
 - `opendart_api.py` - OpenDART API 클라이언트
-- `llm_extractor.py` - OpenAI 이벤트 추출
+- `llm_extractor.py` - OpenAI 이벤트 추출 (POSTPONED)
 - `mongo_repo.py` - MongoDB 저장소
 - `universe.py` - 유니버스 관리
 
@@ -179,9 +176,6 @@ airflow webserver --port 8080  # 터미널 2
 
 **dart_major_reports**
 - 36개 DART 공시 유형 데이터
-
-**dart_event_extractions**
-- LLM 추출 이벤트 + 감정 점수
 
 ## 🔧 문제 해결
 
