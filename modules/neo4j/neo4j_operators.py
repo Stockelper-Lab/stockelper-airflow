@@ -408,11 +408,57 @@ def load_daily_dart_disclosure_events(
 def wipe_neo4j_database(*, neo4j_conn_id: str) -> bool:
     """Delete ALL nodes/relationships from Neo4j (DANGEROUS).
 
-    Intended for rebuild workflows only.
+    Notes:
+    - This does NOT drop indexes/constraints; use `wipe_neo4j_database_full()` for full rebuild.
+    - Intended for rebuild workflows only.
     """
     hook = Neo4jHook(neo4j_conn_id)
     hook.run("MATCH (n) DETACH DELETE n")
     return True
+
+
+def wipe_neo4j_database_full(*, neo4j_conn_id: str) -> dict[str, int]:
+    """Fully wipe Neo4j: drop constraints/indexes (except LOOKUP) and delete all data.
+
+    This is required for clean rebuilds because Neo4j does not allow creating a uniqueness
+    constraint if a conflicting index already exists.
+    """
+    hook = Neo4jHook(neo4j_conn_id)
+
+    dropped_constraints = 0
+    dropped_indexes = 0
+
+    # 1) Drop constraints first (some indexes may be owned by constraints)
+    try:
+        rows = hook.run("SHOW CONSTRAINTS YIELD name RETURN name") or []
+        for r in rows:
+            name = (r or {}).get("name")
+            if not name:
+                continue
+            hook.run(f"DROP CONSTRAINT `{name}` IF EXISTS")
+            dropped_constraints += 1
+    except Exception:  # noqa: BLE001
+        # Best-effort: continue with data wipe
+        pass
+
+    # 2) Drop indexes (skip LOOKUP indexes)
+    try:
+        rows = hook.run("SHOW INDEXES YIELD name, type RETURN name, type") or []
+        for r in rows:
+            name = (r or {}).get("name")
+            idx_type = (r or {}).get("type")
+            if not name:
+                continue
+            if str(idx_type or "").upper() == "LOOKUP":
+                continue
+            hook.run(f"DROP INDEX `{name}` IF EXISTS")
+            dropped_indexes += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) Delete all nodes/relationships
+    hook.run("MATCH (n) DETACH DELETE n")
+    return {"dropped_constraints": dropped_constraints, "dropped_indexes": dropped_indexes}
 
 
 def rebuild_kg_from_postgres_range(
@@ -437,7 +483,7 @@ def rebuild_kg_from_postgres_range(
         raise ValueError(f"Invalid date range: start_date={start_date!r}, end_date={end_date!r}")
 
     if wipe:
-        wipe_neo4j_database(neo4j_conn_id=neo4j_conn_id)
+        wipe_neo4j_database_full(neo4j_conn_id=neo4j_conn_id)
 
     # Re-create constraints/meta marker after wipe
     try:
@@ -583,7 +629,7 @@ def rebuild_kg_from_postgres_all(
 
     # Wipe (optional)
     if wipe:
-        wipe_neo4j_database(neo4j_conn_id=neo4j_conn_id)
+        wipe_neo4j_database_full(neo4j_conn_id=neo4j_conn_id)
 
     # Setup constraints/meta marker after wipe
     try:
