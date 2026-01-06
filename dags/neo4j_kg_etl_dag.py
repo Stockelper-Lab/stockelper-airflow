@@ -1,6 +1,12 @@
-# dags/neo4j_kg_etl_dag.py
 """
-DAG to build and update the Neo4j Knowledge Graph.
+Neo4j Knowledge Graph ETL DAG
+
+UPDATED - 2025-01-06:
+- KG는 **날짜 단위(Date 허브)**로 구성
+- **Event = 공시 카테고리/유형(major-report endpoint)** (뉴스/LLM 이벤트 추출/감성은 POSTPONED)
+- 일일 배치로 PostgreSQL에서 데이터를 읽어 Neo4j에 적재
+  - `daily_stock_price` (주가)
+  - `dart_*` major-report tables (공시 카테고리 이벤트)
 """
 
 from __future__ import annotations
@@ -9,72 +15,56 @@ import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 
-# Assuming the `dags` directory is in PYTHONPATH, we can import from operators
-from modules.neo4j.neo4j_operators import *
-from modules.api.data_validator import run_validate
+from modules.neo4j.neo4j_operators import (
+    create_base_kg_data,
+    load_daily_dart_disclosure_events,
+    load_daily_stock_prices,
+    resolve_daily_target_date,
+)
 
-# --- Constants --- #
-# The connection ID for the Neo4j connection configured in the Airflow UI.
+# Airflow Connection IDs
 NEO4J_CONN_ID = "neo4j_default"
-INPUT_JSON_PATH = "/Users/chan/Documents/workspace/stockelper/neo4j-test/input.json"
+POSTGRES_CONN_ID = "postgres_default"
 
 
 with DAG(
     dag_id="neo4j_kg_etl_dag",
-    start_date=pendulum.datetime(2025, 10, 31, tz="Asia/Seoul"),
+    start_date=pendulum.datetime(2026, 1, 6, tz="Asia/Seoul"),
     catchup=False,
-    schedule="@daily",
-    tags=["neo4j", "kg", "etl"],
-    doc_md="""
-    ### Neo4j Knowledge Graph ETL DAG
-
-    This DAG orchestrates the process of building and updating a financial knowledge graph in Neo4j.
-    It follows an Extract-Load pattern, where data extraction is separated from loading.
-
-    1.  **create_base_kg_data**: (Idempotent) Populates the database with foundational data.
-    2.  **extract_daily_data**: Extracts data from a source (e.g., a file, an API) and passes it to the next task.
-    3.  **load_daily_data**: Loads the extracted data into Neo4j.
-    """,
+    # After 20:00 KST (price collection 완료 이후 KG 적재)
+    schedule="10 20 * * *",
+    tags=["neo4j", "kg", "etl", "daily"],
 ) as dag:
-    # Task 1: (Idempotent) Create foundational data in Neo4j
-    create_base_data_task = PythonOperator(
+    t_setup = PythonOperator(
         task_id="create_base_kg_data",
         python_callable=create_base_kg_data,
+        op_kwargs={"neo4j_conn_id": NEO4J_CONN_ID},
+    )
+
+    t_resolve_date = PythonOperator(
+        task_id="resolve_target_date",
+        python_callable=resolve_daily_target_date,
+        op_kwargs={"postgres_conn_id": POSTGRES_CONN_ID},
+    )
+
+    t_load_prices = PythonOperator(
+        task_id="load_daily_stock_prices",
+        python_callable=load_daily_stock_prices,
         op_kwargs={
             "neo4j_conn_id": NEO4J_CONN_ID,
+            "postgres_conn_id": POSTGRES_CONN_ID,
+            "target_date": "{{ ti.xcom_pull(task_ids='resolve_target_date') }}",
         },
     )
 
-    # Task 2: Extract data from a source (currently a local file)
-    #extract_daily_data_task = PythonOperator(
-    #    task_id="extract_daily_data",
-    #    python_callable=extract_data_from_request,
-    #    op_kwargs={
-    #        "url": "https://raw.githubusercontent.com/ssilb4/test-file-storage/refs/heads/main/input.json",
-    #    },
-    #    trigger_rule="all_done",
-    #)
-
-
-    # Task 2: Extract data from a source (currently a local file)
-    extract_daily_data_task = PythonOperator(
-        task_id="extract_daily_data",
-        python_callable=run_validate,
-        op_kwargs={
-            "test_company": "삼성전자", 
-            "test_stock_code": "005930"
-        },
-        trigger_rule="all_done",
-    )
-
-    # Task 3: Load the extracted data into Neo4j
-    load_daily_data_task = PythonOperator(
-        task_id="load_daily_data",
-        python_callable=load_daily_data,
+    t_load_dart_events = PythonOperator(
+        task_id="load_daily_dart_disclosure_events",
+        python_callable=load_daily_dart_disclosure_events,
         op_kwargs={
             "neo4j_conn_id": NEO4J_CONN_ID,
+            "postgres_conn_id": POSTGRES_CONN_ID,
+            "target_date": "{{ ti.xcom_pull(task_ids='resolve_target_date') }}",
         },
     )
 
-    # Define task dependency chain
-    create_base_data_task >> extract_daily_data_task >> load_daily_data_task
+    t_setup >> t_resolve_date >> t_load_prices >> t_load_dart_events

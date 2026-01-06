@@ -7,6 +7,11 @@ Updated Strategy (2026-01-03):
 - Store to the SAME PostgreSQL as `daily_stock_price` (Airflow Connection: postgres_default).
 - Run daily at 08:00 KST.
 
+UPDATED - 2025-01-06:
+- **이벤트 추출(LLM) / 감성지수 파이프라인은 POSTPONED**
+- 공시정보의 **카테고리/유형(major-report endpoint) 자체를 Event로 사용**하며,
+  Neo4j 적재는 `neo4j_kg_etl_dag`에서 Postgres를 소스로 수행합니다.
+
 Airflow Variables:
 - OPEN_DART_API_KEY: "<your key>"
 - OPEN_DART_API_KEYS (optional): "key1,key2,..." (comma/whitespace separated). If set, rotates keys on 020.
@@ -484,25 +489,16 @@ with DAG(
     catchup=False,
     tags=["dart", "disclosure", "postgres", "curated-major-reports"],
 ) as dag:
-    t_universe = PythonOperator(
-        task_id="load_universe_template",
-        python_callable=load_universe_template,
-    )
     t_collect = PythonOperator(
         task_id="collect_curated_major_reports",
         python_callable=collect_curated_major_reports,
         # Daily collection may iterate multiple 500-sized chunks; allow long runs.
         execution_timeout=pendulum.duration(hours=24),
     )
-    t_extract = PythonOperator(
-        task_id="extract_events",
-        python_callable=extract_events,
-    )
-    t_match = PythonOperator(
-        task_id="pattern_matching",
-        python_callable=pattern_matching,
-    )
 
-    t_universe >> t_collect >> t_extract >> t_match
+    # NOTE:
+    # - LLM 기반 이벤트 추출/감성 분석은 2025-01-06 회의 이후 POSTPONED.
+    # - 공시 카테고리(Event)는 Neo4j KG ETL DAG에서 적재한다.
+    t_collect
 
 
