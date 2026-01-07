@@ -12,6 +12,9 @@ Current approach (UPDATED - 2025-01-06):
 from __future__ import annotations
 
 import json
+import logging
+import os
+import time
 from datetime import date as date_cls, datetime
 from typing import Any
 
@@ -27,6 +30,53 @@ try:  # stockelper-kg is vendored/installed in the Airflow environment
     from stockelper_kg.graph.cypher import generate_constraints as _kg_generate_constraints
 except Exception:  # noqa: BLE001
     _kg_generate_constraints = None
+
+
+log = logging.getLogger(__name__)
+
+
+def _neo4j_run_with_retry(
+    *,
+    hook: Neo4jHook,
+    neo4j_conn_id: str,
+    query: str,
+    parameters: dict[str, Any] | None = None,
+    max_attempts: int = 8,
+    base_sleep_seconds: float = 1.0,
+    max_sleep_seconds: float = 30.0,
+) -> tuple[Neo4jHook, list[dict[str, Any]]]:
+    """Run a Neo4j query with retry on transient connection failures.
+
+    This protects long-running rebuild jobs from intermittent Bolt disconnects,
+    Neo4j restarts, and temporary overload conditions (e.g., during huge wipes).
+    """
+    from neo4j.exceptions import ServiceUnavailable, SessionExpired  # local import: safe in DAG parsing
+
+    last_err: Exception | None = None
+    attempts = max(1, int(max_attempts))
+
+    for attempt in range(1, attempts + 1):
+        try:
+            res = hook.run(query, parameters=parameters) if parameters else hook.run(query)
+            return hook, (res or [])
+        except (ServiceUnavailable, SessionExpired, TimeoutError, OSError) as e:  # noqa: PERF203
+            last_err = e
+            sleep_s = min(max_sleep_seconds, base_sleep_seconds * (2 ** (attempt - 1)))
+            log.warning(
+                "Neo4j transient error (attempt %s/%s). Will retry in %.1fs. Error=%s",
+                attempt,
+                attempts,
+                sleep_s,
+                e,
+            )
+            time.sleep(sleep_s)
+            # Recreate the hook/driver/session for a clean reconnect attempt
+            hook = Neo4jHook(neo4j_conn_id)
+            continue
+
+    if last_err:
+        raise last_err
+    return hook, []
 
 
 # ---------- DART disclosure category/type mapping ----------
@@ -124,11 +174,14 @@ def create_base_kg_data(*, neo4j_conn_id: str):
         )
 
     for stmt in statements:
-        hook.run(stmt)
+        hook, _ = _neo4j_run_with_retry(hook=hook, neo4j_conn_id=neo4j_conn_id, query=stmt, max_attempts=10)
 
-    hook.run(
-        "MERGE (m:Meta {name: 'kg_setup_status'}) "
-        "SET m.complete = true, m.completed_at = datetime()"
+    hook, _ = _neo4j_run_with_retry(
+        hook=hook,
+        neo4j_conn_id=neo4j_conn_id,
+        query="MERGE (m:Meta {name: 'kg_setup_status'}) "
+        "SET m.complete = true, m.completed_at = datetime()",
+        max_attempts=10,
     )
     return {"constraints_applied": len(statements)}
 
@@ -226,7 +279,13 @@ def load_daily_stock_prices(
     loaded = 0
     for i in range(0, len(payload_rows), int(batch_size)):
         batch = payload_rows[i : i + int(batch_size)]
-        hook.run(cypher, parameters={"rows": batch})
+        hook, _ = _neo4j_run_with_retry(
+            hook=hook,
+            neo4j_conn_id=neo4j_conn_id,
+            query=cypher,
+            parameters={"rows": batch},
+            max_attempts=10,
+        )
         loaded += len(batch)
 
     return {"date": date_iso, "loaded_stock_prices": loaded}
@@ -399,7 +458,13 @@ def load_daily_dart_disclosure_events(
     loaded = 0
     for i in range(0, len(payload_rows), int(batch_size)):
         batch = payload_rows[i : i + int(batch_size)]
-        hook.run(cypher, parameters={"rows": batch})
+        hook, _ = _neo4j_run_with_retry(
+            hook=hook,
+            neo4j_conn_id=neo4j_conn_id,
+            query=cypher,
+            parameters={"rows": batch},
+            max_attempts=10,
+        )
         loaded += len(batch)
 
     return {"date": date_iso, "loaded_dart_events": loaded}
@@ -427,6 +492,8 @@ def wipe_neo4j_database_full(*, neo4j_conn_id: str) -> dict[str, int]:
 
     dropped_constraints = 0
     dropped_indexes = 0
+    deleted_relationships = 0
+    deleted_nodes = 0
 
     # 1) Drop constraints first (some indexes may be owned by constraints)
     try:
@@ -456,9 +523,75 @@ def wipe_neo4j_database_full(*, neo4j_conn_id: str) -> dict[str, int]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 3) Delete all nodes/relationships
-    hook.run("MATCH (n) DETACH DELETE n")
-    return {"dropped_constraints": dropped_constraints, "dropped_indexes": dropped_indexes}
+    # 3) Delete all data in batches to avoid long-running "DETACH DELETE" timeouts.
+    #
+    # A single `MATCH (n) DETACH DELETE n` can run for a long time on a large graph and the
+    # Neo4j driver may hit socket timeouts / defunct connections. Instead, we delete in
+    # smaller transactions and retry on transient connection failures.
+
+    def _run_with_retry(statement: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        from neo4j.exceptions import ServiceUnavailable  # local import: avoid import-time surprises
+
+        nonlocal hook
+        last_err: Exception | None = None
+        for attempt in range(1, 6):  # up to 5 attempts
+            try:
+                return hook.run(statement, parameters=parameters) or []
+            except ServiceUnavailable as e:
+                last_err = e
+                # Recreate hook/session on transient driver errors
+                log.warning("Neo4j ServiceUnavailable during wipe (attempt %s/5): %s", attempt, e)
+                hook = Neo4jHook(neo4j_conn_id)
+                time.sleep(min(5, attempt))
+                continue
+            except TimeoutError as e:  # noqa: PERF203
+                last_err = e
+                log.warning("Neo4j TimeoutError during wipe (attempt %s/5): %s", attempt, e)
+                hook = Neo4jHook(neo4j_conn_id)
+                time.sleep(min(5, attempt))
+                continue
+        if last_err:
+            raise last_err
+        return []
+
+    # Smaller batch => shorter transactions => less chance of Bolt socket timeout.
+    # Tune via env var if needed.
+    batch_size = int(os.getenv("NEO4J_WIPE_BATCH_SIZE", "5000"))
+    if batch_size <= 0:
+        batch_size = 5000
+
+    # 3-a) Delete relationships first (faster + no DETACH cost later)
+    while True:
+        rows = _run_with_retry(
+            "MATCH ()-[r]-() WITH r LIMIT $limit DELETE r RETURN count(r) AS deleted",
+            {"limit": batch_size},
+        )
+        n = int((rows[0] or {}).get("deleted") or 0) if rows else 0
+        if n <= 0:
+            break
+        deleted_relationships += n
+        if deleted_relationships and deleted_relationships % (batch_size * 10) == 0:
+            log.info("wipe_neo4j_database_full: deleted_relationships=%s", deleted_relationships)
+
+    # 3-b) Delete nodes
+    while True:
+        rows = _run_with_retry(
+            "MATCH (n) WITH n LIMIT $limit DELETE n RETURN count(n) AS deleted",
+            {"limit": batch_size},
+        )
+        n = int((rows[0] or {}).get("deleted") or 0) if rows else 0
+        if n <= 0:
+            break
+        deleted_nodes += n
+        if deleted_nodes and deleted_nodes % (batch_size * 10) == 0:
+            log.info("wipe_neo4j_database_full: deleted_nodes=%s", deleted_nodes)
+
+    return {
+        "dropped_constraints": dropped_constraints,
+        "dropped_indexes": dropped_indexes,
+        "deleted_relationships": deleted_relationships,
+        "deleted_nodes": deleted_nodes,
+    }
 
 
 def rebuild_kg_from_postgres_range(
