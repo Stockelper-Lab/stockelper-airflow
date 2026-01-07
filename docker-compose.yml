@@ -15,13 +15,24 @@ services:
       - AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8080
       - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:21003
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY:-test}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/data/airflow.db
+      # Airflow metadata DB (use existing stockelper-postgresql container; avoid SQLite locking)
+      - POSTGRES_HOST=${POSTGRES_HOST:-stockelper-postgresql}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-stockelper}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # Main data DB for `postgres_default` (KG loaders read from here)
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+      # Airflow metadata DB name (created automatically by bootstrap script if missing)
+      - AIRFLOW_META_DB_NAME=${AIRFLOW_META_DB_NAME:-airflow_meta}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${AIRFLOW_META_DB_NAME}
       - AIRFLOW_ADMIN_USERNAME=${AIRFLOW_ADMIN_USERNAME:-admin}
       - AIRFLOW_ADMIN_PASSWORD=${AIRFLOW_ADMIN_PASSWORD:-admin}
       - AIRFLOW_ADMIN_EMAIL=${AIRFLOW_ADMIN_EMAIL:-admin@stockelper.com}
       - MONGODB_URI=${MONGODB_URI}
       - MONGO_DATABASE=${MONGO_DATABASE:-stockelper}
-      - NEO4J_URI=${NEO4J_URI:-bolt://stockelper-neo4j:7687}
+      # Neo4j for `neo4j_default`
+      - NEO4J_HOST=${NEO4J_HOST:-stockelper-neo4j}
+      - NEO4J_PORT=${NEO4J_PORT:-7687}
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       # Allow importing sibling repo `stockelper-kg` (mounted below) from Airflow DAGs
@@ -39,12 +50,7 @@ services:
     networks:
       - stockelper
     command: >
-      bash -c "
-        airflow db init &&
-        airflow users create --username $${AIRFLOW_ADMIN_USERNAME} --firstname Admin --lastname User --role Admin --email $${AIRFLOW_ADMIN_EMAIL} --password $${AIRFLOW_ADMIN_PASSWORD} || true &&
-        airflow scheduler &
-        airflow webserver
-      "
+      bash -c "bash /opt/airflow/scripts/bootstrap_airflow.sh"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

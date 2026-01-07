@@ -43,6 +43,7 @@ RUN pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 # Copy DAGs and modules
 COPY dags/ /opt/airflow/dags/
 COPY modules/ /opt/airflow/modules/
+COPY scripts/ /opt/airflow/scripts/
 COPY config/airflow.cfg /opt/airflow/airflow.cfg
 
 # Set environment variables

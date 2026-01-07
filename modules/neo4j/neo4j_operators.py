@@ -19,7 +19,7 @@ from datetime import date as date_cls, datetime
 from typing import Any
 
 import pendulum
-from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowNotFoundException, AirflowSkipException
 from airflow.providers.neo4j.hooks.neo4j import Neo4jHook
 from sqlalchemy import text
 
@@ -59,7 +59,13 @@ def _neo4j_run_with_retry(
         try:
             res = hook.run(query, parameters=parameters) if parameters else hook.run(query)
             return hook, (res or [])
-        except (ServiceUnavailable, SessionExpired, TimeoutError, OSError) as e:  # noqa: PERF203
+        except (
+            ServiceUnavailable,
+            SessionExpired,
+            TimeoutError,
+            OSError,
+            AirflowNotFoundException,
+        ) as e:  # noqa: PERF203
             last_err = e
             sleep_s = min(max_sleep_seconds, base_sleep_seconds * (2 ** (attempt - 1)))
             log.warning(

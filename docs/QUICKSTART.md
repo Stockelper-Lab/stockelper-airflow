@@ -40,6 +40,22 @@ AIRFLOW_SECRET_KEY=your-secure-secret-key-here
 AIRFLOW_ADMIN_USERNAME=admin
 AIRFLOW_ADMIN_PASSWORD=your-secure-password
 AIRFLOW_ADMIN_EMAIL=admin@stockelper.com
+
+# Postgres (Airflow 메타DB + KG 적재 소스)
+# - stockelper-postgresql 컨테이너를 재사용합니다.
+# - AIRFLOW_META_DB_NAME: Airflow 메타DB(자동 생성됨)
+POSTGRES_HOST=stockelper-postgresql
+POSTGRES_PORT=5432
+POSTGRES_USER=stockelper
+POSTGRES_PASSWORD=your-postgres-password
+POSTGRES_DB=postgres
+AIRFLOW_META_DB_NAME=airflow_meta
+
+# Neo4j (KG 타깃)
+NEO4J_HOST=stockelper-neo4j
+NEO4J_PORT=7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your-neo4j-password
 ```
 
 ### 3. 배포

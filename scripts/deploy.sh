@@ -45,12 +45,34 @@ if [ ! -f ".env" ]; then
     echo -e "${YELLOW}⚠️  .env file not found. Creating from .env.example...${NC}"
     if [ -f ".env.example" ]; then
         cp .env.example .env
+        # Add required variables for Postgres metadb / Neo4j connections (placeholders)
+        {
+          grep -q '^POSTGRES_HOST=' .env || echo 'POSTGRES_HOST=stockelper-postgresql'
+          grep -q '^POSTGRES_PORT=' .env || echo 'POSTGRES_PORT=5432'
+          grep -q '^POSTGRES_USER=' .env || echo 'POSTGRES_USER=stockelper'
+          grep -q '^POSTGRES_PASSWORD=' .env || echo 'POSTGRES_PASSWORD=CHANGE_ME'
+          grep -q '^POSTGRES_DB=' .env || echo 'POSTGRES_DB=postgres'
+          grep -q '^AIRFLOW_META_DB_NAME=' .env || echo 'AIRFLOW_META_DB_NAME=airflow_meta'
+          grep -q '^NEO4J_HOST=' .env || echo 'NEO4J_HOST=stockelper-neo4j'
+          grep -q '^NEO4J_PORT=' .env || echo 'NEO4J_PORT=7687'
+          grep -q '^NEO4J_USER=' .env || echo 'NEO4J_USER=neo4j'
+          grep -q '^NEO4J_PASSWORD=' .env || echo 'NEO4J_PASSWORD=CHANGE_ME'
+        } >> .env
         echo -e "${GREEN}✓${NC} Created .env file. Please update it with your configuration."
         echo -e "${YELLOW}→${NC} Edit .env file and run this script again."
         exit 1
     else
         echo -e "${RED}❌ .env.example not found. Cannot create .env file.${NC}"
         exit 1
+    fi
+fi
+
+# If using the default Postgres host, ensure the container exists/runs (best-effort)
+if grep -q '^POSTGRES_HOST=stockelper-postgresql' .env; then
+    if ! docker ps --format '{{.Names}}' | grep -q '^stockelper-postgresql$'; then
+        echo -e "${YELLOW}⚠️  stockelper-postgresql 컨테이너가 실행 중이 아닙니다.${NC}"
+        echo -e "${YELLOW}→${NC} Airflow는 Postgres 메타DB를 사용하므로, 먼저 Postgres 컨테이너를 기동하세요."
+        echo -e "${YELLOW}→${NC} (예) cd ../stockelper-postgresql && docker compose up -d"
     fi
 fi
 
