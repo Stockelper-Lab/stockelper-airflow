@@ -1,0 +1,6 @@
+{
+  "OPEN_DART_API_KEY": "__REPLACE_ME__",
+  "MONGODB_URI": "__REPLACE_ME__",
+  "MONGO_DATABASE": "stockelper",
+  "DART_CURATED_UNIVERSE_JSON": "/opt/airflow/modules/dart_disclosure/universe.ai-sector.template.json"
+}

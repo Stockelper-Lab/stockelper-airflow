@@ -14,6 +14,7 @@ from __future__ import annotations
 import pendulum
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 from modules.neo4j.neo4j_operators import (
     create_base_kg_data,
@@ -60,6 +61,11 @@ with DAG(
     t_load_dart_events = PythonOperator(
         task_id="load_daily_dart_disclosure_events",
         python_callable=load_daily_dart_disclosure_events,
+        # Align with rebuild behavior:
+        # - If the day has no stock prices (holiday/weekend), stock price task may SKIP,
+        #   but DART disclosures for that day should still be loaded.
+        # - If stock price task FAILS, we don't proceed (consistent with rebuild loop behavior).
+        trigger_rule=TriggerRule.NONE_FAILED,
         op_kwargs={
             "neo4j_conn_id": NEO4J_CONN_ID,
             "postgres_conn_id": POSTGRES_CONN_ID,

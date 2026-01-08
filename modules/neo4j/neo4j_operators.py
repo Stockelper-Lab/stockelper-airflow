@@ -148,15 +148,72 @@ def resolve_daily_target_date(*, postgres_conn_id: str = "postgres_default") -> 
     """Resolve the target date for the daily KG load.
 
     Strategy:
-    - Use the latest available `daily_stock_price.date` (confirmed EOD logic is handled upstream).
+    - Use the latest available date across **both** sources:
+      - `daily_stock_price.date` (trading calendar)
+      - `dart_*.rcept_dt` (disclosure calendar; can exist on non-trading days)
+
+    Rationale:
+    - Rebuild loads a union of dates from stock prices and DART disclosures.
+    - Daily should align by not ignoring "DART-only" dates (e.g., holidays/weekends).
     """
     engine = get_postgres_engine(conn_id=postgres_conn_id)
+
+    # 1) Stock price max date
     with engine.begin() as conn:
-        max_date = conn.execute(text("SELECT MAX(date) FROM daily_stock_price")).scalar()
-    date_iso = _to_iso_date(max_date)
-    if not date_iso:
-        raise AirflowSkipException("No rows found in daily_stock_price; skipping KG daily load.")
-    return date_iso
+        sp_max = conn.execute(text("SELECT MAX(date) FROM daily_stock_price")).scalar()
+    sp_max_iso = _to_iso_date(sp_max)
+
+    # 2) DART max date across dart_* major-report tables (same discovery rule as loaders)
+    with engine.begin() as conn:
+        tbl_rows = conn.execute(
+            text(
+                """
+                SELECT t.table_name
+                FROM information_schema.tables t
+                WHERE t.table_schema='public'
+                  AND t.table_name LIKE 'dart_%'
+                  AND t.table_name <> 'dart_event_extractions'
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_no'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='rcept_dt'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='report_type'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='category'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema='public' AND c.table_name=t.table_name AND c.column_name='stock_code'
+                  )
+                ORDER BY t.table_name
+                """
+            )
+        ).fetchall()
+    dart_tables = [r[0] for r in tbl_rows]
+
+    dart_max_iso: str | None = None
+    for t in dart_tables:
+        with engine.begin() as conn:
+            dmax = conn.execute(text(f"SELECT MAX(rcept_dt) FROM {t}")).scalar()
+        dmax_iso = _to_iso_date(dmax)
+        if dmax_iso and (dart_max_iso is None or dmax_iso > dart_max_iso):
+            dart_max_iso = dmax_iso
+
+    candidates = [d for d in (sp_max_iso, dart_max_iso) if d]
+    if not candidates:
+        raise AirflowSkipException(
+            "No usable dates found in Postgres (daily_stock_price and dart_*); skipping KG daily load."
+        )
+
+    return max(candidates)
 
 
 def create_base_kg_data(*, neo4j_conn_id: str):
