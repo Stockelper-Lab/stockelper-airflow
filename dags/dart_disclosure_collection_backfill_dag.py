@@ -116,6 +116,15 @@ def collect_curated_major_reports_backfill(**context):
     from stockelper_kg.collectors.dart_major_reports import DartMajorReportCollector
     from modules.postgres.postgres_connector import get_postgres_engine
 
+    def _normalize_yyyymmdd(raw: object | None) -> str | None:
+        s = str(raw).strip() if raw is not None else ""
+        if not s:
+            return None
+        s = s.replace("-", "").replace("/", "")
+        if len(s) != 8 or not s.isdigit():
+            return None
+        return s
+
     engine = get_postgres_engine(conn_id="postgres_default")
     api_keys_raw = get_setting("OPEN_DART_API_KEYS")
     api_keys = [k for k in re.split(r"[,\s]+", str(api_keys_raw or "").strip()) if k]
@@ -127,19 +136,33 @@ def collect_curated_major_reports_backfill(**context):
     # - This DAG runs daily. If end_date moves every day, progress keys change and you'll re-run forever.
     # - If user didn't set DART_CURATED_BACKFILL_END_DATE, freeze it once in Airflow Variable.
     locked_key = "DART_CURATED_BACKFILL_LOCKED_END_DATE"
-    configured_end = get_setting("DART_CURATED_BACKFILL_END_DATE")
+
+    configured_end_raw = get_setting("DART_CURATED_BACKFILL_END_DATE")
+    configured_end = _normalize_yyyymmdd(configured_end_raw)
+    if configured_end_raw and not configured_end:
+        logger.warning(
+            "Invalid DART_CURATED_BACKFILL_END_DATE=%r; ignoring and using locked/today.",
+            configured_end_raw,
+        )
+
     if configured_end:
         end_s = str(configured_end)
     else:
         try:
-            end_s = str(Variable.get(locked_key))
+            end_s = _normalize_yyyymmdd(Variable.get(locked_key))
         except Exception:  # noqa: BLE001
+            end_s = None
+        if not end_s:
             end_s = _today_seoul_yyyymmdd()
             Variable.set(locked_key, end_s)
 
-    end_s = end_s.replace("-", "")
-    if len(end_s) != 8 or not end_s.isdigit():
-        raise ValueError(f"Invalid DART_CURATED_BACKFILL_END_DATE: {end_s!r}")
+    # Safety: do not allow future end dates (clamp to today, Asia/Seoul)
+    cap_s = _today_seoul_yyyymmdd()
+    if str(end_s) > cap_s:
+        logger.warning("Backfill end_date=%s is in the future; clamping to today=%s", end_s, cap_s)
+        end_s = cap_s
+        if not configured_end:
+            Variable.set(locked_key, end_s)
 
     end_dt = datetime.strptime(end_s, "%Y%m%d")
     start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(years=years)

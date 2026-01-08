@@ -18,15 +18,16 @@ Airflow Variables:
 - DART_CURATED_MAJOR_REPORT_ENDPOINTS (optional): JSON list or comma-separated endpoints to collect.
   If unset, defaults to the curated set defined in this DAG.
 - DART_CURATED_UNIVERSE_JSON (optional): path to universe JSON
-- DART_CURATED_LOOKBACK_DAYS (optional): lookback days for daily run
+- DART_CURATED_LOOKBACK_DAYS (optional): lookback days for daily run (alias of DART_CURATED_DAILY_WINDOW_DAYS)
 - DART_CURATED_SLEEP_SECONDS (optional): sleep seconds between OpenDART calls (default: 0.2)
 - DART_CURATED_TIMEOUT_SECONDS (optional): OpenDART request timeout seconds (default: 30)
 - DART_CURATED_MAX_RETRIES (optional): max retries per endpoint (default: 3)
 
 # Daily (curated) collection cursor:
-# - DART_CURATED_DAILY_LOCKED_END_DATE (optional): YYYYMMDD. If unset, auto-initialized to yesterday (Asia/Seoul).
-# - DART_CURATED_DAILY_END_DATE (optional): YYYYMMDD. If set, always collect this date range (no auto-advance).
-# - DART_CURATED_DAILY_WINDOW_DAYS (optional): number of days per collection window (default: 1)
+# - DART_CURATED_DAILY_LOCKED_END_DATE (optional): YYYYMMDD. If unset/invalid/blank, auto-initialized to today (Asia/Seoul).
+# - DART_CURATED_DAILY_END_DATE (optional): YYYYMMDD or YYYY-MM-DD. If set, always collect this end date (no auto-advance).
+# - DART_CURATED_DAILY_START_DATE (optional): YYYYMMDD or YYYY-MM-DD. If set, use as start date.
+# - DART_CURATED_DAILY_WINDOW_DAYS (optional): number of days per collection window (default: 3)
 # - DART_CURATED_DAILY_CHUNK_SIZE (optional): companies per chunk (default: 500)
 # - DART_CURATED_DAILY_MAX_CHUNKS_PER_RUN (optional): 0=무제한(기본), N=최대 N청크만 수행
 """
@@ -89,21 +90,50 @@ def collect_curated_major_reports(**context):
     from stockelper_kg.collectors.dart_major_reports import DartMajorReportCollector
     from modules.postgres.postgres_connector import get_postgres_engine
 
+    def _normalize_yyyymmdd(raw: object | None) -> str | None:
+        s = str(raw).strip() if raw is not None else ""
+        if not s:
+            return None
+        s = s.replace("-", "").replace("/", "")
+        if len(s) != 8 or not s.isdigit():
+            return None
+        return s
+
     engine = get_postgres_engine(conn_id="postgres_default")
     api_keys_raw = get_setting("OPEN_DART_API_KEYS")
     api_keys = [k for k in re.split(r"[,\s]+", str(api_keys_raw or "").strip()) if k]
     if not api_keys:
         api_keys = [get_required_setting("OPEN_DART_API_KEY")]
 
-    # Daily cursor window (default: yesterday only)
-    daily_window_days = int(get_setting("DART_CURATED_DAILY_WINDOW_DAYS", "1") or "1")
+    # Default behavior: collect the most recent N days (inclusive).
+    # - end_date defaults to TODAY (Asia/Seoul)
+    # - start_date is derived unless explicitly configured
+    lookback_default = get_setting("DART_CURATED_LOOKBACK_DAYS", "3") or "3"
+    daily_window_days = int(
+        get_setting("DART_CURATED_DAILY_WINDOW_DAYS", lookback_default) or lookback_default or "3"
+    )
     if daily_window_days <= 0:
-        raise ValueError(f"Invalid DART_CURATED_DAILY_WINDOW_DAYS: {daily_window_days!r}")
+        logger.warning("Invalid DART_CURATED_DAILY_WINDOW_DAYS=%r; fallback=3", daily_window_days)
+        daily_window_days = 3
 
-    configured_end = get_setting("DART_CURATED_DAILY_END_DATE")
+    configured_start_raw = get_setting("DART_CURATED_DAILY_START_DATE")
+    configured_end_raw = get_setting("DART_CURATED_DAILY_END_DATE")
+    configured_start = _normalize_yyyymmdd(configured_start_raw)
+    configured_end = _normalize_yyyymmdd(configured_end_raw)
+    if configured_start_raw and not configured_start:
+        logger.warning(
+            "Invalid DART_CURATED_DAILY_START_DATE=%r; ignoring and deriving start_date from lookback days.",
+            configured_start_raw,
+        )
+    if configured_end_raw and not configured_end:
+        logger.warning(
+            "Invalid DART_CURATED_DAILY_END_DATE=%r; ignoring and using auto end_date.",
+            configured_end_raw,
+        )
+
     locked_key = "DART_CURATED_DAILY_LOCKED_END_DATE"
 
-    cap_s = pendulum.now("Asia/Seoul").subtract(days=1).format("YYYYMMDD")
+    cap_s = pendulum.now("Asia/Seoul").format("YYYYMMDD")
 
     if configured_end:
         end_s = str(configured_end)
@@ -111,22 +141,33 @@ def collect_curated_major_reports(**context):
     else:
         should_advance_cursor = True
         try:
-            end_s = str(Variable.get(locked_key))
+            end_s = _normalize_yyyymmdd(Variable.get(locked_key))
         except Exception:  # noqa: BLE001
+            end_s = None
+
+        if not end_s:
             end_s = cap_s
             Variable.set(locked_key, end_s)
 
-    end_s = end_s.replace("-", "")
-    if len(end_s) != 8 or not end_s.isdigit():
-        raise ValueError(f"Invalid daily end date: {end_s!r} (expected YYYYMMDD)")
-
-    # Do not process future dates; clamp to yesterday (Asia/Seoul).
-    if end_s > cap_s:
+    # Do not process future dates; clamp to today (Asia/Seoul).
+    if end_s and end_s > cap_s:
         end_s = cap_s
 
-    end_dt = datetime.strptime(end_s, "%Y%m%d")
-    start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(days=daily_window_days - 1)
-    start_s = start_dt.format("YYYYMMDD")
+    end_dt = datetime.strptime(str(end_s), "%Y%m%d")
+
+    if configured_start:
+        start_s = str(configured_start)
+    else:
+        start_dt = pendulum.instance(end_dt, tz="Asia/Seoul").subtract(days=daily_window_days - 1)
+        start_s = start_dt.format("YYYYMMDD")
+
+    if start_s > str(end_s):
+        logger.warning(
+            "Derived start_date=%s is after end_date=%s; clamping start_date=end_date",
+            start_s,
+            end_s,
+        )
+        start_s = str(end_s)
 
     # Chunking (same style as backfill)
     chunk_size = int(get_setting("DART_CURATED_DAILY_CHUNK_SIZE", "500") or "500")
@@ -195,7 +236,7 @@ def collect_curated_major_reports(**context):
 
     # Cursor advance when fully completed for the date range
     if should_advance_cursor and stopped_reason is None and last_processed_count < int(chunk_size):
-        # Advance cursor by 1 day; next run will clamp to yesterday if it is in the future.
+        # Advance cursor by 1 day; next run will clamp to today if it is in the future.
         next_dt = pendulum.instance(end_dt, tz="Asia/Seoul").add(days=1)
         Variable.set(locked_key, next_dt.format("YYYYMMDD"))
 
