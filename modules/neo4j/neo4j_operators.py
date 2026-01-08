@@ -533,6 +533,282 @@ def load_daily_dart_disclosure_events(
     return {"date": date_iso, "loaded_dart_events": loaded}
 
 
+def load_competitor_relationships_from_mongodb(
+    *,
+    neo4j_conn_id: str,
+    mongodb_collection: str = "competitors",
+    batch_size: int = 5000,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Load competitor relationships from MongoDB into Neo4j (idempotent).
+
+    MongoDB source (Airflow Variables / env):
+    - MONGODB_URI
+    - MONGO_DATABASE
+
+    Expected document shape (from `stockelper-airflow` competitor crawler):
+    - _id: target stock_code (string)
+    - target_company: {code, name, ...}
+    - competitors: [{code, name, ...}, ...]
+
+    Graph:
+    - (:Company {stock_code})-[:IS_COMPETITOR]->(:Company {stock_code}) (symmetric)
+    """
+    # Local import to keep DAG parsing lightweight.
+    from modules.common.db_connections import get_db_connection
+
+    db = get_db_connection()
+    collection = db[mongodb_collection]
+    cursor = collection.find()
+    if limit:
+        cursor = cursor.limit(int(limit))
+
+    rows: list[dict[str, Any]] = []
+    for doc in cursor:
+        src_code = str(doc.get("_id") or "").strip()
+        if src_code.isdigit():
+            src_code = src_code.zfill(6)
+        if not src_code:
+            continue
+
+        target = doc.get("target_company") if isinstance(doc.get("target_company"), dict) else {}
+        src_name = str(target.get("name") or "").strip() or None
+
+        competitors = doc.get("competitors")
+        if not isinstance(competitors, list) or not competitors:
+            continue
+
+        for comp in competitors:
+            if not isinstance(comp, dict):
+                continue
+            dst_code = str(comp.get("code") or "").strip()
+            if dst_code.isdigit():
+                dst_code = dst_code.zfill(6)
+            if not dst_code:
+                continue
+            if dst_code == src_code:
+                continue
+
+            dst_name = str(comp.get("name") or "").strip() or None
+            rows.append(
+                {
+                    "src": src_code,
+                    "src_name": src_name,
+                    "dst": dst_code,
+                    "dst_name": dst_name,
+                }
+            )
+
+    if not rows:
+        raise AirflowSkipException(
+            f"No competitor edges found in MongoDB collection={mongodb_collection!r}; skipping."
+        )
+
+    hook = Neo4jHook(neo4j_conn_id)
+    cypher = """
+    UNWIND $rows AS row
+    MERGE (a:Company {stock_code: row.src})
+    SET a.corp_name = coalesce(a.corp_name, row.src_name),
+        a.updated_at = datetime()
+    MERGE (b:Company {stock_code: row.dst})
+    SET b.corp_name = coalesce(b.corp_name, row.dst_name),
+        b.updated_at = datetime()
+    MERGE (a)-[:IS_COMPETITOR]->(b)
+    MERGE (b)-[:IS_COMPETITOR]->(a)
+    """
+
+    loaded = 0
+    for i in range(0, len(rows), int(batch_size)):
+        batch = rows[i : i + int(batch_size)]
+        hook, _ = _neo4j_run_with_retry(
+            hook=hook,
+            neo4j_conn_id=neo4j_conn_id,
+            query=cypher,
+            parameters={"rows": batch},
+            max_attempts=10,
+        )
+        loaded += len(batch)
+
+    return {"loaded_competitor_pairs": loaded, "collection": mongodb_collection}
+
+
+def load_reports_from_mongodb(
+    *,
+    neo4j_conn_id: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    mongodb_collection: str = "report",
+    batch_size: int = 2000,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Load stock research reports from MongoDB into Neo4j (idempotent).
+
+    This ingests `stock_report_crawler` output (MongoDB `report` collection) into the KG
+    using the existing Event/Document pattern:
+    - Document.rcept_no is a synthetic id: RPT_{mongo_object_id}
+    - Event.event_id is: EVT_{Document.rcept_no}
+
+    Graph:
+    - (Company)-[:INVOLVED_IN]->(Event)-[:REPORTED_BY]->(Document)
+    - (Event)-[:OCCURRED_ON]->(EventDate)-[:IS_DATE]->(Date)
+    - (Company)-[:ON_DATE]->(Date)
+    """
+    from modules.common.db_connections import get_db_connection
+
+    start_iso = _to_iso_date(start_date) if start_date else None
+    end_iso = _to_iso_date(end_date) if end_date else None
+
+    query: dict[str, Any] = {}
+    if start_iso or end_iso:
+        cond: dict[str, Any] = {}
+        if start_iso:
+            cond["$gte"] = start_iso
+        if end_iso:
+            cond["$lte"] = end_iso
+        query["date"] = cond
+
+    db = get_db_connection()
+    collection = db[mongodb_collection]
+
+    cursor = collection.find(query).sort([("date", 1), ("code", 1), ("company", 1)])
+    if limit:
+        cursor = cursor.limit(int(limit))
+
+    def _num(val: Any) -> float | None:
+        if val is None:
+            return None
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return float(val)
+        s = str(val).strip().replace(",", "")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:  # noqa: BLE001
+            return None
+
+    rows: list[dict[str, Any]] = []
+    for doc in cursor:
+        date_iso = _to_iso_date(doc.get("date"))
+        if not date_iso:
+            continue
+
+        stock_code = str(doc.get("code") or "").strip()
+        if stock_code.isdigit():
+            stock_code = stock_code.zfill(6)
+        if not stock_code:
+            continue
+
+        corp_name = str(doc.get("company") or "").strip() or None
+        summary = str(doc.get("summary") or "").strip()
+        provider = str(doc.get("provider") or "").strip() or None
+        opinion = str(doc.get("opinion") or "").strip() or None
+        goal_price = _num(doc.get("goal_price"))
+
+        mongo_id = str(doc.get("_id"))
+        rcept_no = f"RPT_{mongo_id}"
+        event_id = f"EVT_{rcept_no}"
+
+        # Keep a compact JSON payload for debugging/searching (avoid non-serializable types)
+        payload_obj = {
+            "mongo_id": mongo_id,
+            "date": date_iso,
+            "company": corp_name,
+            "code": stock_code,
+            "summary": summary,
+            "opinion": opinion,
+            "provider": provider,
+            "goal_price": goal_price,
+            "source": "REPORT",
+        }
+        payload_json = json.dumps(payload_obj, ensure_ascii=False)[:20000]
+
+        parts = _date_parts(date_iso)
+        rows.append(
+            {
+                "event_id": event_id,
+                "rcept_no": rcept_no,
+                "source": "REPORT",
+                "stock_code": stock_code,
+                "corp_name": corp_name,
+                "rcept_dt": date_iso,
+                "provider": provider,
+                "opinion": opinion,
+                "goal_price": goal_price,
+                "summary": summary,
+                "payload_json": payload_json,
+                **parts,
+            }
+        )
+
+    if not rows:
+        raise AirflowSkipException(
+            f"No report rows found in MongoDB collection={mongodb_collection!r} for range {start_iso}..{end_iso}; skipping."
+        )
+
+    hook = Neo4jHook(neo4j_conn_id)
+    cypher = """
+    UNWIND $rows AS row
+    // Company (best-effort)
+    MERGE (c:Company {stock_code: row.stock_code})
+    SET c.corp_name = coalesce(c.corp_name, row.corp_name),
+        c.updated_at = datetime()
+
+    // Dates
+    MERGE (d:Date {date: row.date})
+    SET d.year = row.year, d.month = row.month, d.day = row.day
+    MERGE (ed:EventDate {date: row.date})
+    SET ed.year = row.year, ed.month = row.month, ed.day = row.day
+    MERGE (ed)-[:IS_DATE]->(d)
+    MERGE (c)-[:ON_DATE]->(d)
+
+    // Document (report)
+    MERGE (doc:Document {rcept_no: row.rcept_no})
+    SET doc.report_nm = coalesce(doc.report_nm, row.provider, 'REPORT'),
+        doc.rcept_dt = row.rcept_dt,
+        doc.url = coalesce(doc.url, ''),
+        doc.body = coalesce(row.summary, ''),
+        doc.payload_json = row.payload_json,
+        doc.source = row.source,
+        doc.updated_at = datetime()
+
+    // Event (report)
+    MERGE (e:Event {event_id: row.event_id})
+    SET e.source = row.source,
+        e.report_provider = row.provider,
+        e.opinion = row.opinion,
+        e.goal_price = row.goal_price,
+        e.summary = row.summary,
+        e.payload_json = row.payload_json,
+        e.stock_code = row.stock_code,
+        e.updated_at = datetime()
+
+    // Relationships
+    MERGE (c)-[:INVOLVED_IN]->(e)
+    MERGE (e)-[:REPORTED_BY]->(doc)
+    MERGE (e)-[:OCCURRED_ON]->(ed)
+    """
+
+    loaded = 0
+    for i in range(0, len(rows), int(batch_size)):
+        batch = rows[i : i + int(batch_size)]
+        hook, _ = _neo4j_run_with_retry(
+            hook=hook,
+            neo4j_conn_id=neo4j_conn_id,
+            query=cypher,
+            parameters={"rows": batch},
+            max_attempts=10,
+        )
+        loaded += len(batch)
+
+    return {
+        "start_date": start_iso,
+        "end_date": end_iso,
+        "loaded_reports": loaded,
+        "collection": mongodb_collection,
+    }
+
+
 def wipe_neo4j_database(*, neo4j_conn_id: str) -> bool:
     """Delete ALL nodes/relationships from Neo4j (DANGEROUS).
 
@@ -898,6 +1174,26 @@ def rebuild_kg_from_postgres_all(
         except AirflowSkipException:
             skipped_event_days += 1
 
+    # Load competitor relationships (MongoDB) once per rebuild (not date-scoped).
+    loaded_competitor_pairs = 0
+    try:
+        res_comp = load_competitor_relationships_from_mongodb(neo4j_conn_id=neo4j_conn_id)
+        loaded_competitor_pairs = int(res_comp.get("loaded_competitor_pairs") or 0)
+    except AirflowSkipException:
+        loaded_competitor_pairs = 0
+
+    # Load reports from MongoDB for the same rebuild date range (best-effort).
+    loaded_reports = 0
+    try:
+        res_reports = load_reports_from_mongodb(
+            neo4j_conn_id=neo4j_conn_id,
+            start_date=start_iso,
+            end_date=end_iso,
+        )
+        loaded_reports = int(res_reports.get("loaded_reports") or 0)
+    except AirflowSkipException:
+        loaded_reports = 0
+
     return {
         "start_date": start_iso,
         "end_date": end_iso,
@@ -906,4 +1202,6 @@ def rebuild_kg_from_postgres_all(
         "skipped_event_days": skipped_event_days,
         "loaded_stock_prices": total_prices,
         "loaded_dart_events": total_events,
+        "loaded_competitor_pairs": loaded_competitor_pairs,
+        "loaded_reports": loaded_reports,
     }

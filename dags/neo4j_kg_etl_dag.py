@@ -18,7 +18,9 @@ from airflow.utils.trigger_rule import TriggerRule
 
 from modules.neo4j.neo4j_operators import (
     create_base_kg_data,
+    load_competitor_relationships_from_mongodb,
     load_daily_dart_disclosure_events,
+    load_reports_from_mongodb,
     load_daily_stock_prices,
     resolve_daily_target_date,
 )
@@ -73,4 +75,22 @@ with DAG(
         },
     )
 
-    t_setup >> t_resolve_date >> t_load_prices >> t_load_dart_events
+    t_load_reports = PythonOperator(
+        task_id="load_daily_reports_from_mongodb",
+        python_callable=load_reports_from_mongodb,
+        trigger_rule=TriggerRule.NONE_FAILED,
+        op_kwargs={
+            "neo4j_conn_id": NEO4J_CONN_ID,
+            "start_date": "{{ ti.xcom_pull(task_ids='resolve_target_date') }}",
+            "end_date": "{{ ti.xcom_pull(task_ids='resolve_target_date') }}",
+        },
+    )
+
+    t_load_competitors = PythonOperator(
+        task_id="load_competitor_relationships_from_mongodb",
+        python_callable=load_competitor_relationships_from_mongodb,
+        trigger_rule=TriggerRule.NONE_FAILED,
+        op_kwargs={"neo4j_conn_id": NEO4J_CONN_ID},
+    )
+
+    t_setup >> t_resolve_date >> t_load_prices >> t_load_dart_events >> t_load_reports >> t_load_competitors
